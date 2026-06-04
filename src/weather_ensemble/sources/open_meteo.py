@@ -108,20 +108,54 @@ def fetch_historical_forecasts(
     days_back: int,
     model: str = "best_match",
 ) -> list[ForecastRecord]:
-    """Backfill recent Open-Meteo historical forecasts using the forecast endpoint's past_days."""
-    url = "https://api.open-meteo.com/v1/forecast"
+    """Backfill Open-Meteo historical forecasts.
+
+    This uses the Historical Forecast API, not the Historical Weather API.
+    That distinction matters: these rows are archived model forecasts, while
+    fetch_actual() retrieves verifying weather observations/reanalysis.
+
+    Open-Meteo's archive is structured like the live Forecast API, so the same
+    variables can be used for training and for production inference. If the
+    historical-forecast endpoint is temporarily unavailable, we fall back to the
+    regular forecast endpoint's `past_days` feature for recent dates.
+    """
+    start = date.today() - timedelta(days=days_back)
+    end = date.today() - timedelta(days=1)
     params = {
         "latitude": location.lat,
         "longitude": location.lon,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
         "daily": ",".join([f for f in DAILY_FIELDS if f not in {"precipitation_sum"}]),
         "timezone": location.timezone,
-        "past_days": days_back,
-        "forecast_days": 1,
         "models": model,
     }
-    response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
-    payload = response.json()
+
+    endpoints = [
+        "https://historical-forecast-api.open-meteo.com/v1/forecast",
+        "https://api.open-meteo.com/v1/forecast",
+    ]
+
+    payload = None
+    last_error: Exception | None = None
+    for url in endpoints:
+        request_params = dict(params)
+        if "api.open-meteo.com" in url:
+            request_params.pop("start_date", None)
+            request_params.pop("end_date", None)
+            request_params["past_days"] = days_back
+            request_params["forecast_days"] = 1
+        try:
+            response = requests.get(url, params=request_params, timeout=TIMEOUT_SECONDS)
+            response.raise_for_status()
+            payload = response.json()
+            break
+        except Exception as exc:  # pragma: no cover - network fallback path
+            last_error = exc
+
+    if payload is None:
+        raise RuntimeError(f"Could not fetch historical forecasts: {last_error}")
+
     daily = payload["daily"]
     records: list[ForecastRecord] = []
 
@@ -142,7 +176,7 @@ def fetch_historical_forecasts(
                 rain_probability=_safe(daily.get("precipitation_probability_max"), idx),
                 uv_index=_safe(daily.get("uv_index_max"), idx),
                 wind_speed=_safe(daily.get("wind_speed_10m_max"), idx),
-                raw_json={},
+                raw_json={"endpoint": "historical_forecast_or_past_days", "model": model},
             )
         )
     return records

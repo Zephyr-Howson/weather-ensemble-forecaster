@@ -1,160 +1,188 @@
 # Weather Ensemble Forecaster
 
-A Python-first weather aggregation project that collects forecasts from multiple sources, records actual observed weather, scores each source, and blends tomorrow's forecast using inverse-error weighting.
+A Python-first weather aggregation project that collects forecasts from multiple sources, stores the real weather afterwards, builds a modelling table, and trains an ML post-processing model to improve tomorrow's forecast.
 
-This repo is designed as the backend prototype for a future weather app.
+The project is organised around three phases:
 
-## What it does
+1. **Phase 1 — Collect/backfill data**  
+   Pull historical forecast archives and actual observations, then keep collecting live forecasts every day.
+2. **Phase 2 — Build a modelling dataset**  
+   Convert source-level forecasts into a wide feature table suitable for modelling.
+3. **Phase 3 — Train and use an ML ensemble**  
+   Train one model per weather variable and compare it against the simpler weighted-average baseline.
 
-- Collects tomorrow's daily forecast from:
-  - Open-Meteo `best_match`
-  - Open-Meteo `bom_access_global`
-  - wttr.in
-- Records observed actuals from Open-Meteo Archive.
-- Backfills recent Open-Meteo forecast and actual history so you do not need to wait weeks before testing.
-- Stores data in local SQLite.
-- Exports a modelling table to Parquet.
-- Produces a simple weighted ensemble forecast.
+Open-Meteo is the first-class source because it offers both historical weather observations and historical forecast archives. That means you do not need to wait weeks before training a first model.
+
+---
+
+## Setup
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+pip install -e ".[dev]"
+```
+
+Check the CLI works:
+
+```powershell
+weather-ensemble --help
+```
+
+Run tests:
+
+```powershell
+pytest
+```
+
+---
+
+## Quick start: deploy all 3 phases locally
+
+For Melbourne:
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --deploy-phases 180
+```
+
+This will:
+
+- backfill 180 days of actual observations;
+- backfill Open-Meteo historical forecasts;
+- collect the latest live forecasts;
+- build `data/processed/features.parquet` or fall back to `features.csv`;
+- train models into `models/`;
+- print the latest ML prediction if enough data exists.
+
+For a quicker smoke test:
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --deploy-phases 30
+```
+
+---
+
+## Daily workflow
+
+Once the database exists, run this each night or morning:
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --all --window 14
+```
+
+That runs:
+
+- collect tomorrow's forecasts;
+- record yesterday's actual weather;
+- generate the weighted-average baseline forecast.
+
+Then periodically retrain the ML models:
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --train
+```
+
+Generate the ML forecast:
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --predict-ml
+```
+
+---
+
+## Useful commands
+
+### Backfill historical forecasts and actuals
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --backfill 365
+```
+
+### Build the wide ML feature table
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --build-dataset data/processed/features.parquet
+```
+
+### Train ML models
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --train --model-dir models
+```
+
+### Predict with ML models
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --predict-ml --model-dir models
+```
+
+### Weighted-average baseline forecast
+
+```powershell
+weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --forecast --window 14
+```
+
+---
 
 ## Repository structure
 
 ```text
 weather-ensemble-forecaster/
-  src/weather_ensemble/
-    cli.py                  # command-line entry point
-    config.py               # env/config/location settings
-    db.py                   # SQLite schema and inserts
-    models.py               # typed records
-    service.py              # orchestration, scoring, blending
-    sources/
-      open_meteo.py         # Open-Meteo forecast/archive clients
-      wttr.py               # wttr.in client
-  tests/
-  scripts/
-  data/
-    raw/
-    processed/
-  .github/workflows/tests.yml
-  .env.example
-  pyproject.toml
-  requirements.txt
+├── src/weather_ensemble/
+│   ├── cli.py                 # command line interface
+│   ├── config.py              # default location, variables, DB path
+│   ├── db.py                  # SQLite schema and insert/upsert functions
+│   ├── models.py              # dataclasses for forecasts and actuals
+│   ├── service.py             # collection, backfill, scoring, baseline blending
+│   ├── ml.py                  # Phase 2/3 feature building, training, prediction
+│   ├── phases.py              # one-command pipeline for all 3 phases
+│   └── sources/
+│       ├── open_meteo.py      # live forecast, historical forecast, actual weather
+│       └── wttr.py            # live forecast source
+├── tests/                     # pytest tests
+├── data/                      # local DB/raw/processed data, ignored by git
+├── models/                    # trained ML model files, ignored by git
+├── legacy/                    # original single-file prototype
+├── pyproject.toml             # package metadata and dependencies
+└── README.md
 ```
 
-## Setup
+---
 
-```bash
-git clone <your-repo-url>
-cd weather-ensemble-forecaster
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e .[dev]
-cp .env.example .env
-```
+## What the model currently does
 
-Edit `.env` if you want to change the default location.
+The Phase 3 model trains separate `RandomForestRegressor` models for:
 
-## First-time run
+- max temperature;
+- min temperature;
+- rain probability;
+- UV index;
+- wind speed.
 
-Backfill 30 days of Open-Meteo forecasts and actuals:
+Features include:
 
-```bash
-weather-ensemble --backfill 30
-```
+- each provider's forecast for each variable;
+- cross-source mean, min, max, and standard deviation;
+- month;
+- day of year;
+- day of week.
 
-Collect fresh forecasts, record yesterday's actuals, and generate tomorrow's ensemble:
+This is intentionally simple and robust. The next upgrade would be to add:
 
-```bash
-weather-ensemble --all
-```
+- hourly forecasts instead of only daily values;
+- forecast horizon features;
+- previous day's actual weather;
+- BOM or other Australian-specific sources;
+- XGBoost/LightGBM;
+- a proper backtest comparing ML vs best single provider vs simple average vs weighted average.
 
-For Melbourne explicitly:
+---
 
-```bash
-weather-ensemble --name Melbourne --lat -37.8136 --lon 144.9631 --timezone Australia/Melbourne --all
-```
+## Data note
 
-Export a modelling table:
+There is an important distinction:
 
-```bash
-weather-ensemble --export data/processed/modelling_table.parquet
-```
+- **Historical weather** = what actually happened.
+- **Historical forecast** = what a weather model predicted before it happened.
 
-Run tests:
-
-```bash
-pytest -q
-```
-
-## Data model
-
-### `forecasts`
-
-One row per source, location, target forecast date, and collection time.
-
-Key fields:
-
-- `source`
-- `location_name`
-- `forecast_date`
-- `collected_at`
-- `max_temp`
-- `min_temp`
-- `rain_probability`
-- `uv_index`
-- `wind_speed`
-- `raw_json`
-
-### `actuals`
-
-One row per source, location, and actual date.
-
-Key fields:
-
-- `source`
-- `location_name`
-- `actual_date`
-- `collected_at`
-- `max_temp`
-- `min_temp`
-- `rain_probability`
-- `precipitation_sum`
-- `uv_index`
-- `wind_speed`
-- `raw_json`
-
-## Collection frequency
-
-Recommended schedule while prototyping:
-
-- Forecast snapshot: once daily between 8pm and 10pm local time.
-- Actual weather: once daily the following morning or evening.
-- Backfill: once when setting up a new location.
-- Model/ensemble update: after actuals are recorded.
-
-On macOS/Linux cron example:
-
-```cron
-0 21 * * * cd /path/to/weather-ensemble-forecaster && .venv/bin/weather-ensemble --collect
-0 8 * * * cd /path/to/weather-ensemble-forecaster && .venv/bin/weather-ensemble --record-actual --forecast
-```
-
-## What to collect next
-
-The current repo starts with daily-level features. The next useful upgrade is hourly data:
-
-- hourly temperature
-- hourly rain probability
-- precipitation amount
-- wind speed and gusts
-- humidity
-- pressure
-- cloud cover
-- weather code
-
-For modelling, start with a simple benchmark:
-
-1. Equal-weight average of all sources.
-2. Inverse-MAE weighted average.
-3. Ridge regression or RandomForest using each source's forecast as features.
-
-Only keep the ML model if it beats the simple average on a rolling validation window.
+This project needs both. The actuals are the target. The historical forecasts are the inputs.
