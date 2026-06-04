@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -7,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from weather_ensemble import db
-from weather_ensemble.config import Location, VARIABLES
+from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.sources import FORECAST_SOURCES, open_meteo
 
@@ -49,25 +50,19 @@ def load_modelling_table(db_path: Path, location: Location, window_days: int | N
     if window_days:
         cutoff = (date.today() - timedelta(days=window_days)).isoformat()
 
+    forecast_cols = ",\n                ".join(f"f.{var}" for var in FORECAST_VARIABLES)
+    actual_cols = ",\n                ".join(f"a.{target} AS actual_{target}" for target in TARGETS)
+
     with db.connect(db_path) as conn:
         return pd.read_sql_query(
-            """
+            f"""
             SELECT
                 f.source,
                 f.location_name,
                 f.forecast_date,
                 f.collected_at,
-                f.max_temp,
-                f.min_temp,
-                f.rain_probability,
-                f.uv_index,
-                f.wind_speed,
-                a.max_temp AS actual_max_temp,
-                a.min_temp AS actual_min_temp,
-                a.rain_probability AS actual_rain_probability,
-                a.uv_index AS actual_uv_index,
-                a.wind_speed AS actual_wind_speed,
-                a.precipitation_sum AS actual_precipitation_sum
+                {forecast_cols},
+                {actual_cols}
             FROM forecasts f
             JOIN actuals a
               ON f.location_name = a.location_name
@@ -81,28 +76,26 @@ def load_modelling_table(db_path: Path, location: Location, window_days: int | N
         )
 
 
-def classify_condition(rain_probability: float | None) -> str:
-    if rain_probability is None:
-        return "clear"
-    if rain_probability < 20:
-        return "clear"
-    if rain_probability <= 60:
-        return "cloudy"
-    return "rainy"
-
-
 def compute_mae_scores(df: pd.DataFrame) -> dict[str, dict[str, float]]:
     scores: dict[str, dict[str, float]] = {}
     if df.empty:
         return scores
 
+    # Score forecast variables only where a true observed target exists. Rain
+    # probability is skipped because the observed outcome is did_rain/amount.
+    comparable = {
+        "max_temp": "actual_max_temp",
+        "min_temp": "actual_min_temp",
+        "precipitation_sum": "actual_precipitation_sum",
+        "uv_index": "actual_uv_index",
+        "wind_speed": "actual_wind_speed",
+        "wind_gusts": "actual_wind_gusts",
+    }
+
     for source, source_df in df.groupby("source"):
         scores[source] = {}
-        for var in VARIABLES:
-            actual_col = f"actual_{var}"
-            if var == "rain_probability":
-                actual_col = "actual_rain_probability"
-            if actual_col not in source_df:
+        for var, actual_col in comparable.items():
+            if var not in source_df or actual_col not in source_df:
                 continue
             pair = source_df[[var, actual_col]].dropna()
             if not pair.empty:
@@ -112,7 +105,7 @@ def compute_mae_scores(df: pd.DataFrame) -> dict[str, dict[str, float]]:
 
 def latest_forecasts_for_date(db_path: Path, location: Location, target_date: date) -> pd.DataFrame:
     with db.connect(db_path) as conn:
-        df = pd.read_sql_query(
+        return pd.read_sql_query(
             """
             SELECT f.*
             FROM forecasts f
@@ -130,7 +123,6 @@ def latest_forecasts_for_date(db_path: Path, location: Location, target_date: da
             conn,
             params=(location.name, target_date.isoformat(), location.name, target_date.isoformat()),
         )
-    return df
 
 
 def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[str, Any]:
@@ -145,7 +137,9 @@ def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[
     blended: dict[str, float | None] = {}
     metadata: dict[str, Any] = {"scores": scores, "sources": forecast_df["source"].tolist()}
 
-    for var in VARIABLES:
+    # Weighted baseline is still useful for directly comparable continuous vars.
+    blendable = ["max_temp", "min_temp", "precipitation_sum", "uv_index", "wind_speed", "wind_gusts"]
+    for var in blendable:
         rows = forecast_df[["source", var]].dropna()
         if rows.empty:
             blended[var] = None
@@ -166,27 +160,29 @@ def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[
         blended[var] = round(weighted_sum / total_weight, 2) if total_weight else None
         metadata[var] = details
 
+    # Rain probability remains an input/consumer-facing forecast; average it rather than scoring it against a fake actual.
+    if "rain_probability" in forecast_df:
+        blended["rain_probability"] = round(float(forecast_df["rain_probability"].dropna().mean()), 2) if forecast_df["rain_probability"].notna().any() else None
+
+    # Derived observed-style target from blended precipitation.
+    precip = blended.get("precipitation_sum")
+    blended["did_rain"] = int(precip >= 0.2) if precip is not None else None
+
     with db.connect(db_path) as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO ensemble_predictions (
                 location_name, lat, lon, forecast_date, generated_at, window_days,
-                max_temp, min_temp, rain_probability, uv_index, wind_speed, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                max_temp, min_temp, rain_probability, precipitation_sum, did_rain,
+                uv_index, wind_speed, wind_gusts, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                location.name,
-                location.lat,
-                location.lon,
-                target_date.isoformat(),
-                datetime.now().isoformat(timespec="seconds"),
-                window_days,
-                blended.get("max_temp"),
-                blended.get("min_temp"),
-                blended.get("rain_probability"),
-                blended.get("uv_index"),
-                blended.get("wind_speed"),
-                str(metadata),
+                location.name, location.lat, location.lon, target_date.isoformat(),
+                datetime.now().isoformat(timespec="seconds"), window_days,
+                blended.get("max_temp"), blended.get("min_temp"), blended.get("rain_probability"),
+                blended.get("precipitation_sum"), blended.get("did_rain"), blended.get("uv_index"),
+                blended.get("wind_speed"), blended.get("wind_gusts"), json.dumps(metadata),
             ),
         )
         conn.commit()
@@ -197,5 +193,19 @@ def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[
 def export_modelling_table(db_path: Path, location: Location, output_path: Path) -> Path:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     df = load_modelling_table(db_path, location)
-    df.to_parquet(output_path, index=False)
+    if output_path.suffix.lower() == ".csv":
+        df.to_csv(output_path, index=False)
+    else:
+        df.to_parquet(output_path, index=False)
     return output_path
+
+
+def classify_condition(rain_probability: float | None) -> str:
+    """Simple consumer-facing condition bucket from forecast rain probability."""
+    if rain_probability is None:
+        return "unknown"
+    if rain_probability < 20:
+        return "clear"
+    if rain_probability <= 60:
+        return "cloudy"
+    return "rainy"

@@ -8,14 +8,37 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-VARIABLES: dict[str, str] = {
+# Forecast variables collected from providers. These are inputs/features.
+FORECAST_VARIABLES: dict[str, str] = {
     "max_temp": "Max temperature (°C)",
     "min_temp": "Min temperature (°C)",
     "rain_probability": "Rain probability (%)",
+    "precipitation_sum": "Forecast precipitation amount (mm)",
     "uv_index": "UV index",
     "wind_speed": "Wind speed (km/h)",
+    "wind_gusts": "Wind gusts (km/h)",
+    "cloud_cover": "Cloud cover (%)",
+    "humidity": "Relative humidity (%)",
+    "pressure_msl": "Mean sea-level pressure (hPa)",
+    "weather_code": "Weather condition code",
 }
 
+# Backwards-compatible alias used by older modules/tests.
+VARIABLES = FORECAST_VARIABLES
+
+# True observed targets. Rain probability is deliberately not included because
+# probability is a forecast concept; observations should be amount and did-rain.
+TARGETS: dict[str, str] = {
+    "max_temp": "Actual max temperature (°C)",
+    "min_temp": "Actual min temperature (°C)",
+    "precipitation_sum": "Actual precipitation amount (mm)",
+    "did_rain": "Whether it rained",
+    "uv_index": "Actual UV index",
+    "wind_speed": "Actual wind speed (km/h)",
+    "wind_gusts": "Actual wind gusts (km/h)",
+}
+
+RAIN_THRESHOLD_MM = float(os.getenv("RAIN_THRESHOLD_MM", "0.2"))
 TIMEOUT_SECONDS = 15
 
 

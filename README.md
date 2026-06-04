@@ -186,3 +186,45 @@ There is an important distinction:
 - **Historical forecast** = what a weather model predicted before it happened.
 
 This project needs both. The actuals are the target. The historical forecasts are the inputs.
+
+## Variable set upgraded in v2
+
+The pipeline now separates **forecast features** from **observed targets**.
+
+Forecast features collected where each provider supports them:
+
+- `max_temp`
+- `min_temp`
+- `rain_probability`
+- `precipitation_sum`
+- `uv_index`
+- `wind_speed`
+- `wind_gusts`
+- `cloud_cover`
+- `humidity`
+- `pressure_msl`
+- `weather_code`
+
+Observed targets used for model training:
+
+- `actual_max_temp`
+- `actual_min_temp`
+- `actual_precipitation_sum`
+- `actual_did_rain`
+- `actual_uv_index`
+- `actual_wind_speed`
+- `actual_wind_gusts`
+
+`rain_probability` is no longer treated as an actual target, because probability is a forecast concept rather than something directly observed. Verification now uses `did_rain` and `precipitation_sum`.
+
+The wide ML feature table now also includes source-agreement features for each variable:
+
+- `source_mean__<variable>`
+- `source_median__<variable>`
+- `source_std__<variable>`
+- `source_min__<variable>`
+- `source_max__<variable>`
+- `source_range__<variable>`
+- `source_count__<variable>`
+
+These features let the model learn when providers agree, disagree, or have missing data.

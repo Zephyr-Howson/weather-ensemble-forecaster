@@ -15,6 +15,18 @@ def _to_float(value: object) -> float | None:
         return None
 
 
+def _max_hourly(hourly: list[dict], key: str) -> float | None:
+    vals = [_to_float(h.get(key)) for h in hourly]
+    vals = [v for v in vals if v is not None]
+    return max(vals) if vals else None
+
+
+def _mean_hourly(hourly: list[dict], key: str) -> float | None:
+    vals = [_to_float(h.get(key)) for h in hourly]
+    vals = [v for v in vals if v is not None]
+    return round(sum(vals) / len(vals), 3) if vals else None
+
+
 def fetch_forecast(location: Location) -> ForecastRecord:
     """Fetch tomorrow's forecast from wttr.in."""
     url = f"https://wttr.in/{location.lat},{location.lon}"
@@ -28,10 +40,9 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         raise ValueError("Unexpected wttr.in response structure") from exc
 
     hourly = day.get("hourly", [])
-    rain_probability = max((_to_float(h.get("chanceofrain")) or 0 for h in hourly), default=None)
-    uv_index = max((_to_float(h.get("uvIndex")) or 0 for h in hourly), default=None)
-    wind_speed = max((_to_float(h.get("windspeedKmph")) or 0 for h in hourly), default=None)
 
+    # wttr.in exposes fewer fields and uses different names, so missing values
+    # are left as None rather than faked. The ML pipeline can handle this.
     return ForecastRecord(
         source="wttr_in",
         location_name=location.name,
@@ -41,8 +52,14 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         collected_at=datetime.now(),
         max_temp=_to_float(day.get("maxtempC")),
         min_temp=_to_float(day.get("mintempC")),
-        rain_probability=rain_probability,
-        uv_index=uv_index,
-        wind_speed=wind_speed,
+        rain_probability=_max_hourly(hourly, "chanceofrain"),
+        precipitation_sum=None,  # wttr JSON lacks reliable daily rain total
+        uv_index=_max_hourly(hourly, "uvIndex"),
+        wind_speed=_max_hourly(hourly, "windspeedKmph"),
+        wind_gusts=_max_hourly(hourly, "WindGustKmph"),
+        cloud_cover=_mean_hourly(hourly, "cloudcover"),
+        humidity=_mean_hourly(hourly, "humidity"),
+        pressure_msl=_mean_hourly(hourly, "pressure"),
+        weather_code=_to_float(hourly[0].get("weatherCode")) if hourly else None,
         raw_json=payload,
     )
