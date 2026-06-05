@@ -5,7 +5,7 @@ from typing import Any
 
 from weather_ensemble.config import Location
 from weather_ensemble.ml import build_feature_table, predict_latest_ml, train_models
-from weather_ensemble.service import backfill, collect_open_meteo_only, export_modelling_table, record_actual
+from weather_ensemble.service import backfill, collect_forecasts, collect_open_meteo_only, export_modelling_table, record_actual
 
 
 def deploy_all_phases(
@@ -36,7 +36,7 @@ def deploy_all_phases(
             processed_path = processed_path.with_suffix(".csv")
             feature_df.to_csv(processed_path, index=False)
 
-    training = train_models(db_path, location, model_dir=model_dir, min_rows=min(30, max(10, days_back // 2)))
+    training = train_models(db_path, location, output_dir=model_dir, min_rows=min(30, max(10, days_back // 2)))
     prediction = predict_latest_ml(db_path, location, model_dir=model_dir)
 
     return {

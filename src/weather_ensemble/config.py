@@ -48,8 +48,15 @@ OPEN_METEO_MODELS: dict[str, str] = {
     "best_match": "Open-Meteo Best Match",
     "ecmwf_ifs025": "ECMWF IFS 0.25°",
     "gfs_global": "NOAA GFS Global",
-    "icon_global": "DWD ICON Global",
     "bom_access_global": "BOM ACCESS Global",
+}
+
+# Some Open-Meteo models are not available for every region or endpoint.
+# DWD ICON Global is useful in Europe, but the historical forecast endpoint
+# currently rejects it for Melbourne/Australia, so it is not part of the
+# default Australian backfill suite. Add it manually only for supported regions.
+OPTIONAL_OPEN_METEO_MODELS: dict[str, str] = {
+    "icon_global": "DWD ICON Global",
 }
 
 # Optional live-only providers. They are useful going forward, but they do not
