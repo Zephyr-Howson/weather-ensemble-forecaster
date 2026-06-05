@@ -18,6 +18,14 @@ FORECAST_DAILY_FIELDS = [
     "weather_code",
 ]
 
+# Open-Meteo exposes humidity, cloud cover and pressure as hourly variables.
+# We summarise them to daily means so they can be compared across providers.
+FORECAST_HOURLY_FIELDS = [
+    "relative_humidity_2m",
+    "cloud_cover",
+    "pressure_msl",
+]
+
 # Daily archive does not expose all daily means consistently, so cloud/humidity/
 # pressure are requested hourly and summarised into daily means.
 ACTUAL_DAILY_FIELDS = [
@@ -62,6 +70,7 @@ def fetch_forecast(location: Location, model: str = "best_match") -> ForecastRec
         "latitude": location.lat,
         "longitude": location.lon,
         "daily": ",".join(FORECAST_DAILY_FIELDS),
+        "hourly": ",".join(FORECAST_HOURLY_FIELDS),
         "timezone": location.timezone,
         "forecast_days": 3,
         "models": model,
@@ -70,14 +79,21 @@ def fetch_forecast(location: Location, model: str = "best_match") -> ForecastRec
     response.raise_for_status()
     payload = response.json()
     daily = payload["daily"]
+    hourly = payload.get("hourly", {})
     idx = 1
+    target_date = date.fromisoformat(daily["time"][idx])
+
+    def hourly_for_target(key: str) -> list:
+        times = hourly.get("time", [])
+        values = hourly.get(key, [])
+        return [value for time_str, value in zip(times, values, strict=False) if time_str.startswith(target_date.isoformat())]
 
     return ForecastRecord(
         source=f"open_meteo_{model}",
         location_name=location.name,
         lat=location.lat,
         lon=location.lon,
-        forecast_date=date.fromisoformat(daily["time"][idx]),
+        forecast_date=target_date,
         collected_at=datetime.now(),
         max_temp=_safe(daily.get("temperature_2m_max"), idx),
         min_temp=_safe(daily.get("temperature_2m_min"), idx),
@@ -86,6 +102,9 @@ def fetch_forecast(location: Location, model: str = "best_match") -> ForecastRec
         uv_index=_safe(daily.get("uv_index_max"), idx),
         wind_speed=_safe(daily.get("wind_speed_10m_max"), idx),
         wind_gusts=_safe(daily.get("wind_gusts_10m_max"), idx),
+        cloud_cover=_mean(hourly_for_target("cloud_cover")),
+        humidity=_mean(hourly_for_target("relative_humidity_2m")),
+        pressure_msl=_mean(hourly_for_target("pressure_msl")),
         weather_code=_safe(daily.get("weather_code"), idx),
         raw_json=payload,
     )
@@ -142,6 +161,7 @@ def fetch_historical_forecasts(location: Location, days_back: int, model: str = 
         "start_date": start.isoformat(),
         "end_date": end.isoformat(),
         "daily": ",".join(FORECAST_DAILY_FIELDS),
+        "hourly": ",".join(FORECAST_HOURLY_FIELDS),
         "timezone": location.timezone,
         "models": model,
     }
@@ -172,6 +192,13 @@ def fetch_historical_forecasts(location: Location, days_back: int, model: str = 
         raise RuntimeError(f"Could not fetch historical forecasts: {last_error}")
 
     daily = payload["daily"]
+    hourly = payload.get("hourly", {})
+
+    def hourly_for_date(target: date, key: str) -> list:
+        times = hourly.get("time", [])
+        values = hourly.get(key, [])
+        return [value for time_str, value in zip(times, values, strict=False) if time_str.startswith(target.isoformat())]
+
     records: list[ForecastRecord] = []
     for idx, date_str in enumerate(daily.get("time", [])):
         forecast_date = date.fromisoformat(date_str)
@@ -192,6 +219,9 @@ def fetch_historical_forecasts(location: Location, days_back: int, model: str = 
                 uv_index=_safe(daily.get("uv_index_max"), idx),
                 wind_speed=_safe(daily.get("wind_speed_10m_max"), idx),
                 wind_gusts=_safe(daily.get("wind_gusts_10m_max"), idx),
+                cloud_cover=_mean(hourly_for_date(forecast_date, "cloud_cover")),
+                humidity=_mean(hourly_for_date(forecast_date, "relative_humidity_2m")),
+                pressure_msl=_mean(hourly_for_date(forecast_date, "pressure_msl")),
                 weather_code=_safe(daily.get("weather_code"), idx),
                 raw_json={"endpoint": "historical_forecast_or_past_days", "model": model},
             )

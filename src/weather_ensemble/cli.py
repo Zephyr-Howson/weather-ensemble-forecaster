@@ -16,6 +16,7 @@ from weather_ensemble.service import (
     backfill,
     blend_forecast,
     collect_forecasts,
+    collect_open_meteo_only,
     export_modelling_table,
     record_actual,
 )
@@ -45,6 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--window", type=int, default=get_rolling_window_days())
 
     parser.add_argument("--collect", action="store_true", help="Collect forecasts for tomorrow")
+    parser.add_argument("--collect-open-meteo", action="store_true", help="Collect only free Open-Meteo model forecasts")
     parser.add_argument("--record-actual", action="store_true", help="Record yesterday's actual weather")
     parser.add_argument("--backfill", type=int, metavar="DAYS", help="Backfill forecasts and actuals")
     parser.add_argument("--forecast", action="store_true", help="Generate weighted-average blended forecast")
@@ -107,6 +109,10 @@ def main() -> None:
         backfill(args.db, location, args.backfill)
         print(f"Backfilled {args.backfill} days for {location.name} into {args.db}")
 
+    if args.collect_open_meteo:
+        records = collect_open_meteo_only(args.db, location)
+        print(f"Collected {len(records)} Open-Meteo model forecast records")
+
     if args.collect or args.all:
         records = collect_forecasts(args.db, location)
         print(f"Collected {len(records)} forecast records")
@@ -140,6 +146,7 @@ def main() -> None:
         [
             args.backfill,
             args.collect,
+            args.collect_open_meteo,
             args.record_actual,
             args.forecast,
             args.all,

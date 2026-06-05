@@ -1,3 +1,19 @@
+Metadata-Version: 2.4
+Name: weather-ensemble-forecaster
+Version: 0.1.0
+Summary: Collect, score, and blend weather forecasts from multiple sources.
+Requires-Python: >=3.11
+Description-Content-Type: text/markdown
+Requires-Dist: requests>=2.31.0
+Requires-Dist: pandas>=2.2.0
+Requires-Dist: pydantic>=2.7.0
+Requires-Dist: python-dotenv>=1.0.1
+Requires-Dist: scikit-learn>=1.4.0
+Requires-Dist: pyarrow>=15.0.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: ruff>=0.5.0; extra == "dev"
+
 # Weather Ensemble Forecaster
 
 A Python-first weather aggregation project that collects forecasts from multiple sources, stores the real weather afterwards, builds a modelling table, and trains an ML post-processing model to improve tomorrow's forecast.
@@ -251,40 +267,3 @@ Notes:
 - Open-Meteo remains the main historical forecast backfill source.
 - WeatherAPI and Visual Crossing are included as live forecast collectors in this version. Their standard history endpoints are not treated as true archived forecasts in this project.
 - Humidity, cloud cover and mean sea-level pressure now flow through the Open-Meteo, WeatherAPI, Visual Crossing and wttr.in collectors when available.
-
-
-## V4: Free Open-Meteo Multi-Model Ensemble
-
-This version uses Open-Meteo as the core no-key ensemble. Instead of treating
-Open-Meteo as one source, it collects several model outputs as separate sources:
-
-- `open_meteo_best_match`
-- `open_meteo_ecmwf_ifs025`
-- `open_meteo_gfs_global`
-- `open_meteo_icon_global`
-- `open_meteo_bom_access_global`
-
-This is the recommended first architecture because these sources can be
-backfilled using Open-Meteo historical forecasts. WeatherAPI and Visual Crossing
-remain optional live sources if API keys are available.
-
-### Run the free full pipeline
-
-```powershell
-weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --deploy-phases 365
-```
-
-### Collect only the free Open-Meteo models for tomorrow
-
-```powershell
-weather-ensemble --lat -37.8136 --lon 144.9631 --name Melbourne --timezone Australia/Melbourne --collect-open-meteo
-```
-
-### Inspect the wide feature table
-
-```powershell
-python -c "import pandas as pd; df=pd.read_parquet('data/processed/features.parquet'); print(df.shape); print(df.filter(like='source_count').head())"
-```
-
-You should now see source counts greater than 1, and `source_std__...` /
-`source_range__...` features should become meaningful.

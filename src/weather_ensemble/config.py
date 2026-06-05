@@ -41,6 +41,22 @@ TARGETS: dict[str, str] = {
 RAIN_THRESHOLD_MM = float(os.getenv("RAIN_THRESHOLD_MM", "0.2"))
 TIMEOUT_SECONDS = 15
 
+# Open-Meteo model suite used as the first serious ensemble.
+# These are separate numerical weather prediction systems exposed through
+# Open-Meteo and can be backfilled through the Historical Forecast API.
+OPEN_METEO_MODELS: dict[str, str] = {
+    "best_match": "Open-Meteo Best Match",
+    "ecmwf_ifs025": "ECMWF IFS 0.25°",
+    "gfs_global": "NOAA GFS Global",
+    "icon_global": "DWD ICON Global",
+    "bom_access_global": "BOM ACCESS Global",
+}
+
+# Optional live-only providers. They are useful going forward, but they do not
+# give the same historical forecast backfill advantage as Open-Meteo.
+OPTIONAL_LIVE_PROVIDERS = ["weatherapi", "visual_crossing", "wttr_in"]
+
+
 
 @dataclass(frozen=True)
 class Location:

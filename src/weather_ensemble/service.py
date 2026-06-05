@@ -8,9 +8,9 @@ from typing import Any
 import pandas as pd
 
 from weather_ensemble import db
-from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS
+from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS, OPEN_METEO_MODELS
 from weather_ensemble.models import ForecastRecord
-from weather_ensemble.sources import FORECAST_SOURCES, open_meteo
+from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo
 
 
 def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]:
@@ -19,6 +19,24 @@ def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]
         try:
             records.append(fetcher(location))
         except Exception as exc:  # keep collection robust if one source fails
+            print(f"WARN: {source_name} failed: {exc}")
+
+    with db.connect(db_path) as conn:
+        db.insert_forecasts(conn, records)
+    return records
+
+
+def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastRecord]:
+    """Collect only Open-Meteo model outputs for tomorrow.
+
+    This is useful for a completely free/no-key workflow and for debugging the
+    core model ensemble without optional external APIs.
+    """
+    records: list[ForecastRecord] = []
+    for source_name, fetcher in OPEN_METEO_FORECAST_SOURCES.items():
+        try:
+            records.append(fetcher(location))
+        except Exception as exc:
             print(f"WARN: {source_name} failed: {exc}")
 
     with db.connect(db_path) as conn:
@@ -35,14 +53,24 @@ def record_actual(db_path: Path, location: Location, target_date: date | None = 
 
 
 def backfill(db_path: Path, location: Location, days_back: int) -> None:
+    """Backfill actuals plus all configured Open-Meteo historical forecasts.
+
+    Open-Meteo is intentionally the backbone here because its Historical
+    Forecast API lets us retrieve archived forecasts rather than just observed
+    weather. Optional providers are live-only and are not backfilled here.
+    """
     with db.connect(db_path) as conn:
         for i in range(1, days_back + 1):
             actual = open_meteo.fetch_actual(location, date.today() - timedelta(days=i))
             db.upsert_actual(conn, actual)
 
-        for model in ["best_match", "bom_access_global"]:
-            records = open_meteo.fetch_historical_forecasts(location, days_back, model=model)
-            db.insert_forecasts(conn, records)
+        for model in OPEN_METEO_MODELS:
+            try:
+                records = open_meteo.fetch_historical_forecasts(location, days_back, model=model)
+                inserted = db.insert_forecasts(conn, records)
+                print(f"Backfilled {inserted} rows for open_meteo_{model}")
+            except Exception as exc:
+                print(f"WARN: historical backfill failed for open_meteo_{model}: {exc}")
 
 
 def load_modelling_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:

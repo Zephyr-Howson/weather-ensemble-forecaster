@@ -1,0 +1,2 @@
+[console_scripts]
+weather-ensemble = weather_ensemble.cli:main

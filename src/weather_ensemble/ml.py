@@ -71,7 +71,7 @@ def build_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
         if source_cols:
             wide[f"source_mean__{var}"] = wide[source_cols].mean(axis=1)
             wide[f"source_median__{var}"] = wide[source_cols].median(axis=1)
-            wide[f"source_std__{var}"] = wide[source_cols].std(axis=1)
+            wide[f"source_std__{var}"] = wide[source_cols].std(axis=1, ddof=0)
             wide[f"source_min__{var}"] = wide[source_cols].min(axis=1)
             wide[f"source_max__{var}"] = wide[source_cols].max(axis=1)
             wide[f"source_range__{var}"] = wide[f"source_max__{var}"] - wide[f"source_min__{var}"]
