@@ -5,7 +5,7 @@ from typing import Any
 
 from weather_ensemble.config import Location
 from weather_ensemble.ml import build_feature_table, predict_latest_ml, train_models
-from weather_ensemble.service import backfill, collect_forecasts, collect_open_meteo_only, export_modelling_table, record_actual
+from weather_ensemble.service import backfill, collect_forecasts, record_actual
 
 
 def deploy_all_phases(

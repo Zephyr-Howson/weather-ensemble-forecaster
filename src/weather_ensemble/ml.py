@@ -3,9 +3,10 @@ from __future__ import annotations
 import json
 import pickle
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sklearn.impute import SimpleImputer
@@ -92,8 +93,6 @@ def build_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
     long_df = load_modelling_table(db_path, location)
     return _build_wide_feature_table(long_df, include_targets=True)
 
-
-from zoneinfo import ZoneInfo
 
 def build_prediction_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
     """Build a wide feature row for tomorrow's date, in the location's local time."""

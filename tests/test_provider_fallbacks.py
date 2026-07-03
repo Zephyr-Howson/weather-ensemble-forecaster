@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from datetime import date
-
 from weather_ensemble.config import Location
 from weather_ensemble.sources import visual_crossing, weatherapi
 
