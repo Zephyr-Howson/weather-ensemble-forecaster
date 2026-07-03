@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 
 import requests
 
-from weather_ensemble.config import Location, TIMEOUT_SECONDS
+from weather_ensemble.config import Location, TIMEOUT_SECONDS, local_today
 from weather_ensemble.models import ForecastRecord
 
 
@@ -39,7 +39,7 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     if not api_key:
         raise RuntimeError("VISUAL_CROSSING_KEY is not set. Add it to .env to enable Visual Crossing.")
 
-    target = date.today() + timedelta(days=1)
+    target = local_today(location) + timedelta(days=1)
     url = (
         "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/"
         f"{location.lat},{location.lon}/{target.isoformat()}/{target.isoformat()}"

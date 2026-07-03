@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
@@ -51,6 +53,15 @@ OPEN_METEO_MODELS: dict[str, str] = {
     "gem_seamless": "Environment Canada GEM Seamless",
 }
 
+# Open-Meteo's historical-forecast API does not archive a distinct run for
+# "best_match" - it silently returns the same values as the actuals archive.
+# Backfilling it would leak the answer into training and let it win a fake
+# perfect accuracy score, so only genuinely distinct model runs are backfilled.
+# best_match remains a live-only forecast source (see OPEN_METEO_MODELS).
+OPEN_METEO_BACKFILL_MODELS: dict[str, str] = {
+    key: value for key, value in OPEN_METEO_MODELS.items() if key != "best_match"
+}
+
 # Some Open-Meteo models may return sparse or null fields in certain regions.
 # Keep them optional unless they are verified to provide stable data for your
 # target locations.
@@ -71,6 +82,21 @@ class Location:
     lat: float
     lon: float
     timezone: str = "auto"
+
+
+def local_today(location: Location) -> date:
+    """The location's current local calendar date, not the machine's.
+
+    A server/CI runner's system clock (typically UTC) can be a different calendar day than the
+    forecast location for several hours a day, which would silently shift what "today"/"yesterday"/
+    "tomorrow" resolve to. Location.timezone defaults to "auto" (an Open-Meteo API convention meaning
+    "the server infers timezone from lat/lon"), which zoneinfo can't resolve directly, so fall back to
+    the machine's local date in that case.
+    """
+    try:
+        return datetime.now(ZoneInfo(location.timezone)).date()
+    except ZoneInfoNotFoundError:
+        return date.today()
 
 
 def get_db_path() -> Path:

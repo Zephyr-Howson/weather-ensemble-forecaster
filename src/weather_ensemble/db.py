@@ -11,7 +11,7 @@ FORECAST_COLUMNS = [
     "source", "location_name", "lat", "lon", "forecast_date", "collected_at",
     "max_temp", "min_temp", "rain_probability", "precipitation_sum", "uv_index",
     "wind_speed", "wind_gusts", "cloud_cover", "humidity", "pressure_msl",
-    "weather_code", "raw_json",
+    "weather_code", "raw_json", "collection_method",
 ]
 
 ACTUAL_COLUMNS = [
@@ -59,6 +59,7 @@ def init_db(conn: sqlite3.Connection) -> None:
             pressure_msl REAL,
             weather_code REAL,
             raw_json TEXT,
+            collection_method TEXT,
             UNIQUE(source, location_name, forecast_date, collected_at)
         );
 
@@ -120,11 +121,22 @@ def init_db(conn: sqlite3.Connection) -> None:
     # Lightweight migrations for existing local databases created by earlier versions.
     for col in ["precipitation_sum", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
         _add_column_if_missing(conn, "forecasts", col, "REAL")
+    _add_column_if_missing(conn, "forecasts", "collection_method", "TEXT")
     for col in ["did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
         _add_column_if_missing(conn, "actuals", col, "REAL")
     # Earlier versions had actuals.rain_probability. Leave it if present; no new code uses it.
     for col in ["precipitation_sum", "did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
         _add_column_if_missing(conn, "ensemble_predictions", col, "REAL")
+
+    # Rows inserted before collection_method existed have no way to record how
+    # they were collected. Recover it from the raw_json tag that
+    # fetch_historical_forecasts stamps on backfilled rows; everything else was
+    # collected live.
+    conn.execute(
+        "UPDATE forecasts SET collection_method = 'backfill' "
+        "WHERE collection_method IS NULL AND raw_json LIKE '%historical_forecast_or_past_days%'"
+    )
+    conn.execute("UPDATE forecasts SET collection_method = 'live' WHERE collection_method IS NULL")
     conn.commit()
 
 
@@ -138,7 +150,7 @@ def insert_forecasts(conn: sqlite3.Connection, records: Iterable[ForecastRecord]
             r.collected_at.isoformat(timespec="seconds"), r.max_temp, r.min_temp,
             r.rain_probability, r.precipitation_sum, r.uv_index, r.wind_speed,
             r.wind_gusts, r.cloud_cover, r.humidity, r.pressure_msl, r.weather_code,
-            json.dumps(r.raw_json or {}),
+            json.dumps(r.raw_json or {}), r.collection_method,
         )
         cur = conn.execute(
             f"INSERT OR IGNORE INTO forecasts ({column_list}) VALUES ({placeholders})",

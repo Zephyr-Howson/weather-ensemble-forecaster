@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta
 
 import requests
 
-from weather_ensemble.config import Location, RAIN_THRESHOLD_MM, TIMEOUT_SECONDS
+from weather_ensemble.config import Location, RAIN_THRESHOLD_MM, TIMEOUT_SECONDS, local_today
 from weather_ensemble.models import ActualRecord, ForecastRecord
 
 FORECAST_DAILY_FIELDS = [
@@ -153,8 +153,9 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
 
 def fetch_historical_forecasts(location: Location, days_back: int, model: str = "best_match") -> list[ForecastRecord]:
     """Backfill archived model forecasts, not observations."""
-    start = date.today() - timedelta(days=days_back)
-    end = date.today() - timedelta(days=1)
+    today = local_today(location)
+    start = today - timedelta(days=days_back)
+    end = today - timedelta(days=1)
     params = {
         "latitude": location.lat,
         "longitude": location.lon,
@@ -202,7 +203,7 @@ def fetch_historical_forecasts(location: Location, days_back: int, model: str = 
     records: list[ForecastRecord] = []
     for idx, date_str in enumerate(daily.get("time", [])):
         forecast_date = date.fromisoformat(date_str)
-        if forecast_date >= date.today():
+        if forecast_date >= today:
             continue
         records.append(
             ForecastRecord(
@@ -224,6 +225,7 @@ def fetch_historical_forecasts(location: Location, days_back: int, model: str = 
                 pressure_msl=_mean(hourly_for_date(forecast_date, "pressure_msl")),
                 weather_code=_safe(daily.get("weather_code"), idx),
                 raw_json={"endpoint": "historical_forecast_or_past_days", "model": model},
+                collection_method="backfill",
             )
         )
     return records

@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from weather_ensemble import db
-from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS, OPEN_METEO_MODELS
+from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS, OPEN_METEO_BACKFILL_MODELS, local_today
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo
 
@@ -46,7 +46,7 @@ def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastR
 
 def record_actual(db_path: Path, location: Location, target_date: date | None = None) -> None:
     if target_date is None:
-        target_date = date.today() - timedelta(days=1)
+        target_date = local_today(location) - timedelta(days=1)
     actual = open_meteo.fetch_actual(location, target_date)
     with db.connect(db_path) as conn:
         db.upsert_actual(conn, actual)
@@ -59,12 +59,16 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
     Forecast API lets us retrieve archived forecasts rather than just observed
     weather. Optional providers are live-only and are not backfilled here.
     """
+    today = local_today(location)
     with db.connect(db_path) as conn:
         for i in range(1, days_back + 1):
-            actual = open_meteo.fetch_actual(location, date.today() - timedelta(days=i))
-            db.upsert_actual(conn, actual)
+            try:
+                actual = open_meteo.fetch_actual(location, today - timedelta(days=i))
+                db.upsert_actual(conn, actual)
+            except Exception as exc:
+                print(f"WARN: actual backfill failed for day -{i}: {exc}")
 
-        for model in OPEN_METEO_MODELS:
+        for model in OPEN_METEO_BACKFILL_MODELS:
             try:
                 records = open_meteo.fetch_historical_forecasts(location, days_back, model=model)
                 inserted = db.insert_forecasts(conn, records)
@@ -76,7 +80,7 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
 def load_modelling_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:
     cutoff = "0000-01-01"
     if window_days:
-        cutoff = (date.today() - timedelta(days=window_days)).isoformat()
+        cutoff = (local_today(location) - timedelta(days=window_days)).isoformat()
 
     forecast_cols = ",\n                ".join(f"f.{var}" for var in FORECAST_VARIABLES)
     actual_cols = ",\n                ".join(f"a.{target} AS actual_{target}" for target in TARGETS)
@@ -84,6 +88,17 @@ def load_modelling_table(db_path: Path, location: Location, window_days: int | N
     with db.connect(db_path) as conn:
         return pd.read_sql_query(
             f"""
+            WITH ranked AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY location_name, forecast_date, source
+                           ORDER BY CASE WHEN collection_method = 'live' THEN 0 ELSE 1 END,
+                                    collected_at DESC
+                       ) AS rn
+                FROM forecasts
+                WHERE location_name = ?
+                  AND forecast_date >= ?
+            )
             SELECT
                 f.source,
                 f.location_name,
@@ -91,12 +106,11 @@ def load_modelling_table(db_path: Path, location: Location, window_days: int | N
                 f.collected_at,
                 {forecast_cols},
                 {actual_cols}
-            FROM forecasts f
+            FROM ranked f
             JOIN actuals a
               ON f.location_name = a.location_name
              AND f.forecast_date = a.actual_date
-            WHERE f.location_name = ?
-              AND f.forecast_date >= ?
+            WHERE f.rn = 1
             ORDER BY f.forecast_date, f.source
             """,
             conn,
@@ -154,7 +168,7 @@ def latest_forecasts_for_date(db_path: Path, location: Location, target_date: da
 
 
 def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[str, Any]:
-    target_date = date.today() + timedelta(days=1)
+    target_date = local_today(location) + timedelta(days=1)
     forecast_df = latest_forecasts_for_date(db_path, location, target_date)
     if forecast_df.empty:
         return {"error": "No forecasts found. Run collect first.", "forecast_date": target_date.isoformat()}

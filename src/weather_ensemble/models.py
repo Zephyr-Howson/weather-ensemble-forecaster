@@ -25,6 +25,7 @@ class ForecastRecord:
     pressure_msl: float | None = None
     weather_code: float | None = None
     raw_json: dict[str, Any] | None = None
+    collection_method: str = "live"
 
 
 @dataclass(frozen=True)

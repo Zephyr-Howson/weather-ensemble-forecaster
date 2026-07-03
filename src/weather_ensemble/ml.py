@@ -8,8 +8,8 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression, Ridge
 from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_error, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
@@ -19,7 +19,13 @@ from weather_ensemble.service import latest_forecasts_for_date, load_modelling_t
 
 TARGET_MAP = {target: f"actual_{target}" for target in TARGETS}
 CLASSIFICATION_TARGETS = {"did_rain"}
-MODEL_VERSION = "phase3-rf-expanded-weather-v2"
+MODEL_VERSION = "phase4-ridge-logreg-narrow-features-v1"
+
+DATE_FEATURES = ["month", "day_of_year", "day_of_week"]
+
+# did_rain has no forecast variable of its own (it's derived from precipitation),
+# so its features are drawn from precipitation_sum's columns instead.
+FEATURE_TARGET_OVERRIDE = {"did_rain": "precipitation_sum"}
 
 
 @dataclass(frozen=True)
@@ -87,18 +93,32 @@ def build_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
     return _build_wide_feature_table(long_df, include_targets=True)
 
 
+from zoneinfo import ZoneInfo
+
 def build_prediction_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
-    """Build a wide feature row from the latest live forecast date."""
-    target_date = date.today() + timedelta(days=1)
+    """Build a wide feature row for tomorrow's date, in the location's local time."""
+    local_today = datetime.now(ZoneInfo(location.timezone)).date()
+    target_date = local_today + timedelta(days=1)
     long_df = latest_forecasts_for_date(db_path, location, target_date)
     return _build_wide_feature_table(long_df, include_targets=False)
 
 
 def feature_columns(df: pd.DataFrame) -> list[str]:
     excluded = {"location_name", "forecast_date", *TARGET_MAP.values()}
-    # Keep numeric features only; RandomForest cannot consume strings/datetimes.
+    # Keep numeric features only; the model pipelines cannot consume strings/datetimes.
     cols = [c for c in df.columns if c not in excluded]
     return [c for c in cols if pd.api.types.is_numeric_dtype(df[c])]
+
+
+def features_for_target(df: pd.DataFrame, var: str) -> list[str]:
+    """Only this variable's own signals: its per-source forecasts, cross-source stats, and date features.
+
+    Using every forecast variable's columns to predict every target is a p >> n setup on a dataset
+    this small, and overfits badly (see notebooks/ml_model_comparison.ipynb). source_count is dropped
+    since all configured sources are typically present for backfilled rows, making it constant/uninformative.
+    """
+    cols = [c for c in df.columns if c.endswith(f"__{var}") and c != f"source_count__{var}"]
+    return cols + [c for c in DATE_FEATURES if c in df.columns]
 
 
 def _make_model(target_name: str) -> tuple[str, Pipeline]:
@@ -108,7 +128,7 @@ def _make_model(target_name: str) -> tuple[str, Pipeline]:
             Pipeline(
                 steps=[
                     ("imputer", SimpleImputer(strategy="median")),
-                    ("model", RandomForestClassifier(n_estimators=300, min_samples_leaf=3, random_state=42, n_jobs=-1)),
+                    ("model", LogisticRegression(max_iter=1000)),
                 ]
             ),
         )
@@ -117,7 +137,7 @@ def _make_model(target_name: str) -> tuple[str, Pipeline]:
         Pipeline(
             steps=[
                 ("imputer", SimpleImputer(strategy="median")),
-                ("model", RandomForestRegressor(n_estimators=300, min_samples_leaf=3, random_state=42, n_jobs=-1)),
+                ("model", Ridge(alpha=1.0)),
             ]
         ),
     )
@@ -129,15 +149,10 @@ def train_models(db_path: Path, location: Location, output_dir: Path, min_rows: 
     if df.empty:
         return {"error": "No modelling rows available. Run backfill first."}
 
-    features = feature_columns(df)
-    if not features:
-        return {"error": "No numeric feature columns available."}
-
     results: dict[str, Any] = {
         "model_version": MODEL_VERSION,
         "location": location.name,
         "rows_available": int(len(df)),
-        "feature_count": len(features),
         "trained_at": datetime.now().isoformat(timespec="seconds"),
         "targets": {},
     }
@@ -145,6 +160,12 @@ def train_models(db_path: Path, location: Location, output_dir: Path, min_rows: 
     for target_name, target_col in TARGET_MAP.items():
         if target_col not in df.columns:
             results["targets"][target_name] = {"status": "skipped", "reason": f"Missing {target_col}."}
+            continue
+
+        feature_var = FEATURE_TARGET_OVERRIDE.get(target_name, target_name)
+        features = features_for_target(df, feature_var)
+        if not features:
+            results["targets"][target_name] = {"status": "skipped", "reason": f"No feature columns available for '{feature_var}'."}
             continue
 
         data = df[features + [target_col]].dropna(subset=[target_col])
@@ -182,7 +203,12 @@ def train_models(db_path: Path, location: Location, output_dir: Path, min_rows: 
         bundle = TrainedModelBundle(target=target_name, features=features, model=model, metrics=metrics, trained_at=results["trained_at"], model_type=model_type)
         with (output_dir / f"{target_name}.pkl").open("wb") as f:
             pickle.dump(bundle, f)
-        results["targets"][target_name] = {"status": "trained", "model_type": model_type, **metrics}
+        results["targets"][target_name] = {
+            "status": "trained",
+            "model_type": model_type,
+            "feature_count": len(features),
+            **metrics,
+        }
 
     with (output_dir / "training_summary.json").open("w", encoding="utf-8") as f:
         json.dump(results, f, indent=2)
