@@ -262,7 +262,7 @@ Open-Meteo as one source, it collects several model outputs as separate sources:
 - `open_meteo_ecmwf_ifs025`
 - `open_meteo_gfs_global`
 - `open_meteo_icon_global`
-- `open_meteo_bom_access_global`
+- `open_meteo_gem_seamless`
 
 This is the recommended first architecture because these sources can be
 backfilled using Open-Meteo historical forecasts. WeatherAPI and Visual Crossing

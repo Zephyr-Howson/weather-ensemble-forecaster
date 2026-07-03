@@ -61,6 +61,11 @@ def fetch_forecast(location: Location) -> ForecastRecord:
 
     hours = day.get("hours", [])
 
+    wind_gusts = _to_float(day.get("windgust"))
+    cloud_cover = _to_float(day.get("cloudcover"))
+    humidity = _to_float(day.get("humidity"))
+    pressure = _to_float(day.get("pressure"))
+
     return ForecastRecord(
         source="visual_crossing",
         location_name=location.name,
@@ -74,10 +79,10 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         precipitation_sum=_to_float(day.get("precip")),
         uv_index=_to_float(day.get("uvindex")),
         wind_speed=_to_float(day.get("windspeed")),
-        wind_gusts=_to_float(day.get("windgust")) or _max(hours, "windgust"),
-        cloud_cover=_to_float(day.get("cloudcover")) or _mean(hours, "cloudcover"),
-        humidity=_to_float(day.get("humidity")) or _mean(hours, "humidity"),
-        pressure_msl=_to_float(day.get("pressure")) or _mean(hours, "pressure"),
+        wind_gusts=wind_gusts if wind_gusts is not None else _max(hours, "windgust"),
+        cloud_cover=cloud_cover if cloud_cover is not None else _mean(hours, "cloudcover"),
+        humidity=humidity if humidity is not None else _mean(hours, "humidity"),
+        pressure_msl=pressure if pressure is not None else _mean(hours, "pressure"),
         weather_code=None,  # Visual Crossing uses textual conditions/icons rather than WMO codes.
         raw_json=payload,
     )

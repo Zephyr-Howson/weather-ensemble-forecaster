@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pickle
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +15,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
 from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS
-from weather_ensemble.service import load_modelling_table
+from weather_ensemble.service import latest_forecasts_for_date, load_modelling_table
 
 TARGET_MAP = {target: f"actual_{target}" for target in TARGETS}
 CLASSIFICATION_TARGETS = {"did_rain"}
@@ -32,18 +32,14 @@ class TrainedModelBundle:
     model_type: str
 
 
-def build_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
-    """Build one wide training row per forecast date.
-
-    Includes source-specific forecast columns plus ensemble statistics across
-    sources: mean, median, std, min, max and range. These disagreement/spread
-    features are often as important as the raw provider values.
-    """
-    long_df = load_modelling_table(db_path, location)
+def _build_wide_feature_table(long_df: pd.DataFrame, include_targets: bool) -> pd.DataFrame:
+    """Build wide source-agreement features from a long forecast table."""
     if long_df.empty:
         return long_df
 
-    base_cols = ["location_name", "forecast_date"] + list(TARGET_MAP.values())
+    base_cols = ["location_name", "forecast_date"]
+    if include_targets:
+        base_cols.extend(TARGET_MAP.values())
     base_cols = [c for c in base_cols if c in long_df.columns]
     base = long_df[base_cols].drop_duplicates(subset=["location_name", "forecast_date"])
 
@@ -78,6 +74,24 @@ def build_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
             wide[f"source_count__{var}"] = wide[source_cols].notna().sum(axis=1)
 
     return wide.sort_values("forecast_date")
+
+
+def build_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
+    """Build one wide training row per forecast date.
+
+    Includes source-specific forecast columns plus ensemble statistics across
+    sources: mean, median, std, min, max and range. These disagreement/spread
+    features are often as important as the raw provider values.
+    """
+    long_df = load_modelling_table(db_path, location)
+    return _build_wide_feature_table(long_df, include_targets=True)
+
+
+def build_prediction_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
+    """Build a wide feature row from the latest live forecast date."""
+    target_date = date.today() + timedelta(days=1)
+    long_df = latest_forecasts_for_date(db_path, location, target_date)
+    return _build_wide_feature_table(long_df, include_targets=False)
 
 
 def feature_columns(df: pd.DataFrame) -> list[str]:
@@ -182,9 +196,9 @@ def load_model_bundle(model_dir: Path, target: str) -> TrainedModelBundle:
 
 
 def predict_latest_ml(db_path: Path, location: Location, model_dir: Path) -> dict[str, Any]:
-    df = build_feature_table(db_path, location)
+    df = build_prediction_feature_table(db_path, location)
     if df.empty:
-        return {"error": "No feature rows available."}
+        return {"error": "No forecasts found. Run collect first."}
 
     latest = df.sort_values("forecast_date").tail(1)
     forecast_date = latest["forecast_date"].iloc[0].date().isoformat()

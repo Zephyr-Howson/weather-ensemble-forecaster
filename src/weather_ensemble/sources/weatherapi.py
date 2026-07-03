@@ -65,6 +65,8 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     if isinstance(condition, dict):
         weather_code = _to_float(condition.get("code"))
 
+    humidity = _to_float(day_info.get("avghumidity"))
+
     return ForecastRecord(
         source="weatherapi",
         location_name=location.name,
@@ -80,7 +82,7 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         wind_speed=_to_float(day_info.get("maxwind_kph")),
         wind_gusts=_max(hours, "gust_kph"),
         cloud_cover=_mean(hours, "cloud"),
-        humidity=_to_float(day_info.get("avghumidity")) or _mean(hours, "humidity"),
+        humidity=humidity if humidity is not None else _mean(hours, "humidity"),
         pressure_msl=_mean(hours, "pressure_mb"),
         weather_code=weather_code,
         raw_json=payload,
