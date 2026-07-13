@@ -31,6 +31,9 @@ jobs:
         env:
           WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
           VISUAL_CROSSING_KEY: ${{ secrets.VISUAL_CROSSING_KEY }}
+          OPENWEATHERMAP_KEY: ${{ secrets.OPENWEATHERMAP_KEY }}
+          WEATHERBIT_KEY: ${{ secrets.WEATHERBIT_KEY }}
+          ACCUWEATHER_KEY: ${{ secrets.ACCUWEATHER_KEY }}
         run: |
           weather-ensemble \
             --lat -37.8136 --lon 144.9631 \

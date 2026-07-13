@@ -72,7 +72,14 @@ OPTIONAL_OPEN_METEO_MODELS: dict[str, str] = {
 
 # Optional live-only providers. They are useful going forward, but they do not
 # give the same historical forecast backfill advantage as Open-Meteo.
-OPTIONAL_LIVE_PROVIDERS = ["weatherapi", "visual_crossing", "wttr_in"]
+OPTIONAL_LIVE_PROVIDERS = [
+    "weatherapi",
+    "visual_crossing",
+    "wttr_in",
+    "openweathermap",
+    "weatherbit",
+    "accuweather",
+]
 
 
 

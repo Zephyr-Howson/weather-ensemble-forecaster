@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,15 @@ from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS, OPEN_
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo
 
+# requests' HTTPError messages embed the full request URL, and most providers here
+# put their API key in the query string - so printing an exception verbatim can leak
+# a live key into logs/CI output. Strip query strings before anything gets printed.
+_QUERY_STRING = re.compile(r"\?\S*")
+
+
+def _safe_error(exc: Exception) -> str:
+    return _QUERY_STRING.sub("?<redacted>", str(exc))
+
 
 def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]:
     records: list[ForecastRecord] = []
@@ -19,7 +29,7 @@ def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]
         try:
             records.append(fetcher(location))
         except Exception as exc:  # keep collection robust if one source fails
-            print(f"WARN: {source_name} failed: {exc}")
+            print(f"WARN: {source_name} failed: {_safe_error(exc)}")
 
     with db.connect(db_path) as conn:
         db.insert_forecasts(conn, records)
@@ -37,7 +47,7 @@ def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastR
         try:
             records.append(fetcher(location))
         except Exception as exc:
-            print(f"WARN: {source_name} failed: {exc}")
+            print(f"WARN: {source_name} failed: {_safe_error(exc)}")
 
     with db.connect(db_path) as conn:
         db.insert_forecasts(conn, records)
@@ -66,7 +76,7 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
                 actual = open_meteo.fetch_actual(location, today - timedelta(days=i))
                 db.upsert_actual(conn, actual)
             except Exception as exc:
-                print(f"WARN: actual backfill failed for day -{i}: {exc}")
+                print(f"WARN: actual backfill failed for day -{i}: {_safe_error(exc)}")
 
         for model in OPEN_METEO_BACKFILL_MODELS:
             try:
@@ -74,7 +84,7 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
                 inserted = db.insert_forecasts(conn, records)
                 print(f"Backfilled {inserted} rows for open_meteo_{model}")
             except Exception as exc:
-                print(f"WARN: historical backfill failed for open_meteo_{model}: {exc}")
+                print(f"WARN: historical backfill failed for open_meteo_{model}: {_safe_error(exc)}")
 
 
 def load_modelling_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:

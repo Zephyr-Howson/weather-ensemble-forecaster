@@ -4,7 +4,15 @@ from collections.abc import Callable
 
 from weather_ensemble.config import Location, OPEN_METEO_MODELS
 from weather_ensemble.models import ForecastRecord
-from weather_ensemble.sources import open_meteo, visual_crossing, weatherapi, wttr
+from weather_ensemble.sources import (
+    accuweather,
+    open_meteo,
+    openweathermap,
+    visual_crossing,
+    weatherapi,
+    weatherbit,
+    wttr,
+)
 
 ForecastFetcher = Callable[[Location], ForecastRecord]
 
@@ -21,6 +29,9 @@ OPTIONAL_FORECAST_SOURCES: dict[str, ForecastFetcher] = {
     "wttr_in": wttr.fetch_forecast,
     "weatherapi": weatherapi.fetch_forecast,
     "visual_crossing": visual_crossing.fetch_forecast,
+    "openweathermap": openweathermap.fetch_forecast,
+    "weatherbit": weatherbit.fetch_forecast,
+    "accuweather": accuweather.fetch_forecast,
 }
 
 FORECAST_SOURCES: dict[str, ForecastFetcher] = {
