@@ -15,6 +15,7 @@ from sklearn.metrics import accuracy_score, mean_absolute_error, mean_squared_er
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
+from weather_ensemble import db
 from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS
 from weather_ensemble.service import latest_forecasts_for_date, load_modelling_table
 
@@ -247,5 +248,25 @@ def predict_latest_ml(db_path: Path, location: Location, model_dir: Path) -> dic
 
     if not predictions:
         return {"error": "No trained models found. Run --train first."}
+
+    generated_at = datetime.now().isoformat(timespec="seconds")
+    with db.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ml_predictions (
+                location_name, lat, lon, forecast_date, generated_at, model_version,
+                max_temp, min_temp, precipitation_sum, did_rain, did_rain_probability,
+                uv_index, wind_speed, wind_gusts, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                location.name, location.lat, location.lon, forecast_date, generated_at, MODEL_VERSION,
+                predictions.get("max_temp"), predictions.get("min_temp"), predictions.get("precipitation_sum"),
+                predictions.get("did_rain"), predictions.get("did_rain_probability"),
+                predictions.get("uv_index"), predictions.get("wind_speed"), predictions.get("wind_gusts"),
+                json.dumps(metadata),
+            ),
+        )
+        conn.commit()
 
     return {"forecast_date": forecast_date, "model_version": MODEL_VERSION, "predictions": predictions, "metadata": metadata}

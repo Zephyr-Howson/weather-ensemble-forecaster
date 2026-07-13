@@ -115,6 +115,26 @@ def init_db(conn: sqlite3.Connection) -> None:
             metadata_json TEXT,
             UNIQUE(location_name, forecast_date, generated_at)
         );
+
+        CREATE TABLE IF NOT EXISTS ml_predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location_name TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            forecast_date TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            max_temp REAL,
+            min_temp REAL,
+            precipitation_sum REAL,
+            did_rain REAL,
+            did_rain_probability REAL,
+            uv_index REAL,
+            wind_speed REAL,
+            wind_gusts REAL,
+            metadata_json TEXT,
+            UNIQUE(location_name, forecast_date, generated_at)
+        );
         """
     )
 
