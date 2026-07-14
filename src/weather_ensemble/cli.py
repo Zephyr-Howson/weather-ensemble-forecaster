@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from weather_ensemble.config import (
+    AUSTRALIAN_LOCATIONS,
     Location,
     get_db_path,
     get_default_location,
@@ -72,6 +73,12 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DAYS",
         help="Run Phase 1 backfill, Phase 2 dataset build, and Phase 3 model training",
     )
+    parser.add_argument(
+        "--all-locations",
+        action="store_true",
+        help="Repeat the requested actions for every location in AUSTRALIAN_LOCATIONS "
+        "instead of a single --lat/--lon location",
+    )
     return parser
 
 
@@ -89,11 +96,7 @@ def _write_dataframe(df, path: Path) -> Path:
         return fallback
 
 
-def main() -> None:
-    parser = build_parser()
-    args = parser.parse_args()
-    location = _location_from_args(args)
-
+def _run_for_location(args: argparse.Namespace, location: Location) -> None:
     if args.deploy_phases:
         result = deploy_all_phases(
             db_path=args.db,
@@ -142,6 +145,11 @@ def main() -> None:
         result = predict_latest_ml(args.db, location, args.model_dir)
         _print_json(result)
 
+
+def main() -> None:
+    parser = build_parser()
+    args = parser.parse_args()
+
     if not any(
         [
             args.backfill,
@@ -158,6 +166,14 @@ def main() -> None:
         ]
     ):
         parser.print_help()
+        return
+
+    if args.all_locations:
+        for location in AUSTRALIAN_LOCATIONS:
+            print(f"=== {location.name} ===")
+            _run_for_location(args, location)
+    else:
+        _run_for_location(args, _location_from_args(args))
 
 
 if __name__ == "__main__":

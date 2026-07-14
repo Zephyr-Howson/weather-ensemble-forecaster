@@ -91,6 +91,46 @@ class Location:
     timezone: str = "auto"
 
 
+# Curated set of Australian locations for multi-location collection: the 8 state/
+# territory capitals, a spread of large regional towns, and popular tourist
+# destinations (including Lorne and Shoreham specifically).
+AUSTRALIAN_LOCATIONS: list[Location] = [
+    # Capital cities
+    Location("Sydney", -33.8688, 151.2093, "Australia/Sydney"),
+    Location("Melbourne", -37.8136, 144.9631, "Australia/Melbourne"),
+    Location("Brisbane", -27.4698, 153.0251, "Australia/Brisbane"),
+    Location("Perth", -31.9505, 115.8605, "Australia/Perth"),
+    Location("Adelaide", -34.9285, 138.6007, "Australia/Adelaide"),
+    Location("Hobart", -42.8821, 147.3272, "Australia/Hobart"),
+    Location("Darwin", -12.4634, 130.8456, "Australia/Darwin"),
+    Location("Canberra", -35.2809, 149.1300, "Australia/Sydney"),
+    # Large regional towns
+    Location("Gold Coast", -28.0167, 153.4000, "Australia/Brisbane"),
+    Location("Newcastle", -32.9283, 151.7817, "Australia/Sydney"),
+    Location("Geelong", -38.1499, 144.3617, "Australia/Melbourne"),
+    Location("Cairns", -16.9186, 145.7781, "Australia/Brisbane"),
+    Location("Townsville", -19.2590, 146.8169, "Australia/Brisbane"),
+    Location("Ballarat", -37.5622, 143.8503, "Australia/Melbourne"),
+    Location("Bendigo", -36.7570, 144.2794, "Australia/Melbourne"),
+    Location("Launceston", -41.4332, 147.1441, "Australia/Hobart"),
+    Location("Wollongong", -34.4278, 150.8931, "Australia/Sydney"),
+    Location("Toowoomba", -27.5598, 151.9507, "Australia/Brisbane"),
+    Location("Alice Springs", -23.6980, 133.8807, "Australia/Darwin"),
+    Location("Mount Gambier", -37.8284, 140.7804, "Australia/Adelaide"),
+    # Tourist locations
+    Location("Lorne", -38.5423, 143.9750, "Australia/Melbourne"),
+    Location("Shoreham", -38.3833, 145.0833, "Australia/Melbourne"),
+    Location("Byron Bay", -28.6474, 153.6020, "Australia/Sydney"),
+    Location("Port Douglas", -16.4850, 145.4650, "Australia/Brisbane"),
+    Location("Broome", -17.9614, 122.2359, "Australia/Perth"),
+    Location("Margaret River", -33.9550, 115.0750, "Australia/Perth"),
+    Location("Yulara", -25.2406, 130.9889, "Australia/Darwin"),
+    Location("Noosa Heads", -26.3936, 153.0919, "Australia/Brisbane"),
+    Location("Phillip Island", -38.4495, 145.2410, "Australia/Melbourne"),
+    Location("Kangaroo Island", -35.6580, 137.6180, "Australia/Adelaide"),
+]
+
+
 def local_today(location: Location) -> date:
     """The location's current local calendar date, not the machine's.
 
