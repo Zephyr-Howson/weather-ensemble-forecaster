@@ -12,6 +12,8 @@ from weather_ensemble.config import (
     get_default_location,
     get_rolling_window_days,
 )
+from weather_ensemble.backtest import backtest_predictions
+from weather_ensemble.maintenance import deduplicate
 from weather_ensemble.ml import build_feature_table, predict_latest_ml, train_models
 from weather_ensemble.phases import deploy_all_phases
 from weather_ensemble.report import build_html_report
@@ -94,6 +96,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run Phase 1 backfill, Phase 2 dataset build, and Phase 3 model training",
     )
     parser.add_argument(
+        "--backtest-days",
+        type=int,
+        metavar="DAYS",
+        help="Walk-forward: regenerate ensemble+ML predictions for each of the past DAYS days, "
+        "using only data available before that date. Skips dates that already have a prediction.",
+    )
+    parser.add_argument(
         "--all-locations",
         action="store_true",
         help="Repeat the requested actions for every location in AUSTRALIAN_LOCATIONS "
@@ -124,6 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=90,
         help="How far back every chart in the accuracy report goes (default 90, ~3 months)",
+    )
+    parser.add_argument(
+        "--dedupe",
+        action="store_true",
+        help="Remove duplicate rows across forecasts/actuals/ensemble_predictions/ml_predictions "
+        "(same source/location/date), keeping the highest-priority one (whole database, not per-location)",
     )
     return parser
 
@@ -194,6 +209,12 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> None:
         result = predict_latest_ml(args.db, location, model_dir)
         _print_json(result)
 
+    if args.backtest_days:
+        result = backtest_predictions(
+            args.db, location, days=args.backtest_days, ensemble_window_days=args.window, train_window_days=args.train_window
+        )
+        _print_json(result)
+
 
 def main() -> None:
     parser = build_parser()
@@ -211,11 +232,16 @@ def main() -> None:
         args.train,
         args.predict_ml,
         args.deploy_phases,
+        args.backtest_days,
     ]
 
-    if not any(per_location_actions) and not args.accuracy_report:
+    if not any(per_location_actions) and not args.accuracy_report and not args.dedupe:
         parser.print_help()
         return
+
+    if args.dedupe:
+        result = deduplicate(args.db)
+        _print_json(result)
 
     if any(per_location_actions):
         if args.all_locations:

@@ -9,7 +9,14 @@ from typing import Any
 import pandas as pd
 
 from weather_ensemble import db
-from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS, OPEN_METEO_BACKFILL_MODELS, local_today
+from weather_ensemble.config import (
+    FORECAST_VARIABLES,
+    Location,
+    OPEN_METEO_BACKFILL_MODELS,
+    RAIN_THRESHOLD_MM,
+    TARGETS,
+    local_today,
+)
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo
 
@@ -177,15 +184,14 @@ def latest_forecasts_for_date(db_path: Path, location: Location, target_date: da
         )
 
 
-def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[str, Any]:
-    target_date = local_today(location) + timedelta(days=1)
-    forecast_df = latest_forecasts_for_date(db_path, location, target_date)
-    if forecast_df.empty:
-        return {"error": "No forecasts found. Run collect first.", "forecast_date": target_date.isoformat()}
+def blend_weighted(forecast_df: pd.DataFrame, scores: dict[str, dict[str, float]]) -> tuple[dict[str, float | None], dict[str, Any]]:
+    """Inverse-MAE weighted average of every source's forecast, for one target date.
 
-    history_df = load_modelling_table(db_path, location, window_days=window_days)
-    scores = compute_mae_scores(history_df)
-
+    Shared by the live "tomorrow" blend (`blend_forecast`) and the historical
+    walk-forward backtest (`backtest.py`) - both need the exact same weighting
+    formula, just fed a forecast row and a scores dict computed differently
+    (relative to real "today" vs. relative to an arbitrary past date).
+    """
     blended: dict[str, float | None] = {}
     metadata: dict[str, Any] = {"scores": scores, "sources": forecast_df["source"].tolist()}
 
@@ -218,7 +224,20 @@ def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[
 
     # Derived observed-style target from blended precipitation.
     precip = blended.get("precipitation_sum")
-    blended["did_rain"] = int(precip >= 0.2) if precip is not None else None
+    blended["did_rain"] = int(precip >= RAIN_THRESHOLD_MM) if precip is not None else None
+
+    return blended, metadata
+
+
+def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[str, Any]:
+    target_date = local_today(location) + timedelta(days=1)
+    forecast_df = latest_forecasts_for_date(db_path, location, target_date)
+    if forecast_df.empty:
+        return {"error": "No forecasts found. Run collect first.", "forecast_date": target_date.isoformat()}
+
+    history_df = load_modelling_table(db_path, location, window_days=window_days)
+    scores = compute_mae_scores(history_df)
+    blended, metadata = blend_weighted(forecast_df, scores)
 
     with db.connect(db_path) as conn:
         conn.execute(
