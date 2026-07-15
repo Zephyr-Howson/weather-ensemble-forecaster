@@ -81,8 +81,15 @@ BASELINE_STYLE = {
 RAW_SOURCE_LEGEND = "Individual forecast sources"
 RAW_SOURCE_BASE_STYLE = {"dash": "solid", "width": 1.5, "opacity": 0.8}
 RAW_SOURCE_ORDER = list(FORECAST_SOURCES.keys())
-ORANGE_LIGHT, RED_LIGHT = "#eb6834", "#e34948"
-ORANGE_DARK, RED_DARK = "#d95926", "#e66767"
+# Yellow -> dark red: wide enough in both hue and lightness that adjacent
+# sources stay visually distinct even after the 0.8 opacity blend that keeps
+# them de-emphasized behind the ensemble/ML hero lines. The palette's own
+# orange/red categorical steps span too narrow a range for this (both read as
+# "orange-ish red", barely different once alpha-blended) - this ramp is
+# deliberately wider than the validated 8-hue categorical set since it's
+# ordinal-by-position (a fixed source order), not identity-by-hue-family.
+RAW_SOURCE_GRADIENT_LIGHT = ("#d1a300", "#7a1220")
+RAW_SOURCE_GRADIENT_DARK = ("#f2c14e", "#b23a4a")
 
 # Paint order (traces added in this order so the models the report is about
 # render on top of the de-emphasized context lines behind them).
@@ -115,7 +122,10 @@ def _raw_source_colors(models: set[str]) -> dict[str, dict[str, str]]:
     colors = {}
     for i, name in enumerate(order):
         t = i / (n - 1) if n > 1 else 0.0
-        colors[name] = {"light": _hex_lerp(ORANGE_LIGHT, RED_LIGHT, t), "dark": _hex_lerp(ORANGE_DARK, RED_DARK, t)}
+        colors[name] = {
+            "light": _hex_lerp(*RAW_SOURCE_GRADIENT_LIGHT, t),
+            "dark": _hex_lerp(*RAW_SOURCE_GRADIENT_DARK, t),
+        }
     return colors
 
 
@@ -124,7 +134,7 @@ def _style_for(model: str, raw_colors: dict[str, dict[str, str]]) -> dict:
         return HERO_STYLE[model]
     if model in BASELINE_STYLE:
         return BASELINE_STYLE[model]
-    colors = raw_colors.get(model, {"light": ORANGE_LIGHT, "dark": ORANGE_DARK})
+    colors = raw_colors.get(model, {"light": RAW_SOURCE_GRADIENT_LIGHT[0], "dark": RAW_SOURCE_GRADIENT_DARK[0]})
     return {"legend": RAW_SOURCE_LEGEND, **RAW_SOURCE_BASE_STYLE, **colors}
 
 
@@ -150,9 +160,13 @@ def _axis_layout(fig: go.Figure) -> None:
     fig.update_yaxes(gridcolor=CHROME["light"]["grid"], linecolor=CHROME["light"]["axis"], zeroline=False, showgrid=False)
 
 
+def _board_height(n_bars: int) -> int:
+    return 34 * max(n_bars, 1) + 60
+
+
 def _leaderboard_figure(
     board_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]
-) -> tuple[go.Figure, list[str], list[str], list[str]]:
+) -> tuple[go.Figure, list[str], list[str], list[str], int]:
     board_t = board_t.sort_values("mae", ascending=True)
     model_order = board_t["model"].tolist()
     colors_light = [_style_for(m, raw_colors)["light"] for m in model_order]
@@ -172,31 +186,45 @@ def _leaderboard_figure(
         )
     )
     _axis_layout(fig)
-    fig.update_xaxes(title_text="MAE")
+    fig.update_xaxes(title_text="MAE", rangemode="tozero")
     fig.update_yaxes(autorange="reversed")
-    n_bars = max(len(board_t), 1)
-    fig.update_layout(height=34 * n_bars + 60)
-    return fig, colors_light, colors_dark, model_order
+    height = _board_height(len(board_t))
+    fig.update_layout(height=height)
+    return fig, colors_light, colors_dark, model_order, height
 
 
 def _trend_figure(
-    trend_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]
-) -> tuple[go.Figure, list[str], list[str], list[str]]:
+    date_index: list[str],
+    model_order: list[str],
+    series_by_model: list[list],
+    raw_colors: dict[str, dict[str, str]],
+    height: int,
+) -> tuple[go.Figure, list[str], list[str]]:
+    """Build the trend figure with every trace's x fixed to the full `date_index`.
+
+    Every trace (even one with real data on only a handful of those dates)
+    gets the same-length x/y from the start. This matters beyond the initial
+    render: the location dropdown's client-side Plotly.restyle only ever
+    updates `y` (x never changes when switching locations), so if a trace's x
+    were shorter than the other locations' y-arrays, the restyle would
+    silently misalign the real values against the wrong dates instead of
+    erroring - exactly the bug that made a partial-history line (like the
+    ensemble/ML backtest, or a single-sample source) vanish or scramble.
+    """
     fig = go.Figure()
     colors_light: list[str] = []
     colors_dark: list[str] = []
     legend_seen: set[str] = set()
-    model_order = sorted(trend_t["model"].unique(), key=_z_key)
+    x = pd.to_datetime(date_index)
 
-    for model in model_order:
+    for model, y in zip(model_order, series_by_model):
         style = _style_for(model, raw_colors)
-        group = trend_t[trend_t["model"] == model].sort_values("forecast_date")
         show = style["legend"] not in legend_seen
         legend_seen.add(style["legend"])
         fig.add_trace(
             go.Scatter(
-                x=group["forecast_date"],
-                y=group["rolling_mae"],
+                x=x,
+                y=y,
                 mode="lines",
                 name=style["legend"],
                 legendgroup=style["legend"],
@@ -211,9 +239,9 @@ def _trend_figure(
 
     _axis_layout(fig)
     fig.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11)))
-    fig.update_layout(hovermode="x unified", height=300, margin=dict(l=48, r=16, t=48, b=36))
-    fig.update_yaxes(title_text="rolling MAE", showgrid=True)
-    return fig, colors_light, colors_dark, model_order
+    fig.update_layout(hovermode="x unified", height=height, margin=dict(l=48, r=16, t=48, b=36))
+    fig.update_yaxes(title_text="rolling MAE", showgrid=True, rangemode="tozero")
+    return fig, colors_light, colors_dark
 
 
 def _board_series(subset_t: pd.DataFrame, model_order: list[str], recent_days: int) -> tuple[list, list]:
@@ -312,6 +340,12 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 }
 .theme-toggle:hover { color: var(--text-primary); }
 .location-select { font-family: inherit; }
+.baseline-toggle {
+  display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary);
+  border: 1px solid var(--border); background: var(--surface-1); border-radius: 8px;
+  padding: 7px 12px; cursor: pointer; white-space: nowrap;
+}
+.baseline-toggle input { margin: 0; cursor: pointer; }
 
 .legend-key { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 22px; font-size: 12.5px; color: var(--text-secondary); }
 .legend-key span.swatch { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
@@ -349,13 +383,14 @@ function applyPlotlyTheme(dark) {{
     : {{font: "{CHROME['light']['font']}", grid: "{CHROME['light']['grid']}", axis: "{CHROME['light']['axis']}"}};
   document.querySelectorAll(".js-plotly-plot").forEach(function (div) {{
     var spec = window.__THEME_TRACES[div.id];
-    if (spec) {{
-      var colors = dark ? spec.dark : spec.light;
-      if (spec.kind === "bar") {{
-        Plotly.restyle(div, {{"marker.color": [colors]}});
-      }} else {{
-        Plotly.restyle(div, {{"line.color": colors}});
-      }}
+    // Line-chart trace count never changes (only visibility toggles), so its
+    // color array is always the right length to restyle directly. The bar
+    // chart's baseline entries can be filtered OUT of x/y/text/customdata by
+    // the baseline toggle - restyling its (always-full-length) color array
+    // here independently of that filter would misalign colors against bars
+    // (see renderCharts). Bar coloring is handled there instead, called below.
+    if (spec && spec.kind !== "bar") {{
+      Plotly.restyle(div, {{"line.color": dark ? spec.dark : spec.light}});
     }}
     Plotly.relayout(div, {{
       "font.color": chrome.font,
@@ -363,6 +398,7 @@ function applyPlotlyTheme(dark) {{
       "xaxis.linecolor": chrome.axis, "yaxis.linecolor": chrome.axis,
     }});
   }});
+  if (typeof renderCharts === "function") renderCharts();
 }}
 function currentTheme() {{
   var stored = localStorage.getItem("weather-report-theme");
@@ -393,42 +429,87 @@ document.addEventListener("DOMContentLoaded", function () {{
 """
 
 
-def _location_script(location_data: dict) -> str:
+def _controls_script(location_data: dict) -> str:
     return f"""
 <script>
 window.__LOCATION_DATA = {json.dumps(location_data)};
-function applyLocation(loc) {{
+function renderCharts() {{
+  var select = document.getElementById("location-select");
+  var baselineToggle = document.getElementById("baseline-toggle");
+  var loc = select ? select.value : "__ALL__";
+  var showBaselines = baselineToggle ? baselineToggle.checked : true;
+
   Object.keys(window.__LOCATION_DATA).forEach(function (target) {{
     var spec = window.__LOCATION_DATA[target];
     var locData = spec.locations[loc] || spec.locations["__ALL__"];
-    var boardDiv = document.getElementById("board-" + target);
-    if (boardDiv && locData) {{
-      Plotly.restyle(boardDiv, {{
-        x: [locData.mae],
-        text: [locData.mae.map(function (v) {{ return v === null ? "" : v.toFixed(2); }})],
-        customdata: [locData.n],
-      }});
+    if (!locData) return;
+    var mask = spec.baseline_mask_board;
+
+    var boardId = "board-" + target;
+    var boardDiv = document.getElementById(boardId);
+    if (boardDiv) {{
+      var mae = locData.mae, n = locData.n, categories = spec.board_categories;
+      // Colors must be filtered by the exact same mask, in the exact same
+      // restyle call, as x/y/text/customdata - a bar chart's baseline entries
+      // live inside these arrays (not separate traces), so filtering the
+      // values without also filtering marker.color shifts every color that
+      // came after a removed baseline one slot out of place (this is what
+      // made weatherbit/gfs_global sometimes render grey - the baseline's
+      // color - when baselines were hidden).
+      var themeSpec = window.__THEME_TRACES[boardId];
+      var isDark = document.documentElement.getAttribute("data-theme") === "dark";
+      var colors = themeSpec ? (isDark ? themeSpec.dark : themeSpec.light) : null;
+      if (!showBaselines) {{
+        mae = mae.filter(function (_, i) {{ return !mask[i]; }});
+        n = n.filter(function (_, i) {{ return !mask[i]; }});
+        categories = categories.filter(function (_, i) {{ return !mask[i]; }});
+        if (colors) colors = colors.filter(function (_, i) {{ return !mask[i]; }});
+      }}
+      var update = {{
+        x: [mae],
+        y: [categories],
+        text: [mae.map(function (v) {{ return v === null ? "" : v.toFixed(2); }})],
+        customdata: [n],
+      }};
+      if (colors) update["marker.color"] = [colors];
+      Plotly.restyle(boardDiv, update);
+      Plotly.relayout(boardDiv, {{"xaxis.autorange": true}});
     }}
+
     var trendDiv = document.getElementById("trend-" + target);
-    if (trendDiv && locData) {{
+    if (trendDiv) {{
       Plotly.restyle(trendDiv, {{y: locData.trend}});
+      var baselineIdx = spec.baseline_trace_indices_trend;
+      if (baselineIdx && baselineIdx.length) {{
+        Plotly.restyle(trendDiv, {{visible: showBaselines}}, baselineIdx);
+      }}
+      Plotly.relayout(trendDiv, {{"yaxis.autorange": true}});
     }}
   }});
+
   var chip = document.getElementById("location-chip");
   if (chip) chip.textContent = loc === "__ALL__" ? "all locations pooled" : "viewing " + loc;
   localStorage.setItem("weather-report-location", loc);
+  localStorage.setItem("weather-report-show-baselines", showBaselines ? "1" : "0");
 }}
 document.addEventListener("DOMContentLoaded", function () {{
   var select = document.getElementById("location-select");
-  if (!select) return;
-  var stored = localStorage.getItem("weather-report-location");
+  var baselineToggle = document.getElementById("baseline-toggle");
+  if (!select || !baselineToggle) return;
+
+  var storedLoc = localStorage.getItem("weather-report-location");
   var hasOption = false;
   for (var i = 0; i < select.options.length; i++) {{
-    if (select.options[i].value === stored) {{ hasOption = true; break; }}
+    if (select.options[i].value === storedLoc) {{ hasOption = true; break; }}
   }}
-  if (hasOption) select.value = stored;
-  applyLocation(select.value);
-  select.addEventListener("change", function () {{ applyLocation(select.value); }});
+  if (hasOption) select.value = storedLoc;
+
+  var storedBaselines = localStorage.getItem("weather-report-show-baselines");
+  if (storedBaselines !== null) baselineToggle.checked = storedBaselines === "1";
+
+  renderCharts();
+  select.addEventListener("change", renderCharts);
+  baselineToggle.addEventListener("change", renderCharts);
 }});
 </script>
 """
@@ -499,19 +580,45 @@ def build_html_report(
 
         board_id = f"board-{target}"
         trend_id = f"trend-{target}"
-        board_fig, board_light, board_dark, board_order = _leaderboard_figure(board_t, raw_colors)
-        trend_fig, trend_light, trend_dark, trend_order = _trend_figure(trend_t, raw_colors)
+        board_fig, board_light, board_dark, board_order, panel_height = _leaderboard_figure(board_t, raw_colors)
+
+        trend_order = sorted(trend_t["model"].unique(), key=_z_key)
+        date_index = sorted({d.date().isoformat() for d in trend_t["forecast_date"]})
+        # Computed once and reused as both the initial ("All locations") render
+        # and the "__ALL__" entry in the location cube below, so the two can
+        # never drift apart into different numbers for the same view.
+        all_trend_series = _trend_series(target_slices[target], trend_order, date_index, rolling_window)
+        all_mae, all_n = _board_series(target_slices[target], board_order, recent_days)
+
+        # Same height as the bar chart next to it, not a fixed 300px - the
+        # bar chart's height already flexes with its row count (34px/bar), so
+        # matching it here keeps both panels the same height in the layout
+        # instead of leaving the (usually taller) bar chart's extra space unused.
+        trend_fig, trend_light, trend_dark = _trend_figure(date_index, trend_order, all_trend_series, raw_colors, panel_height)
         theme_traces[board_id] = {"kind": "bar", "light": board_light, "dark": board_dark}
         theme_traces[trend_id] = {"kind": "line", "light": trend_light, "dark": trend_dark}
 
-        date_index = sorted({d.date().isoformat() for d in trend_t["forecast_date"]})
-        locations_payload = {}
-        for loc in ["__ALL__", *location_names]:
-            subset_t = target_slices[target] if loc == "__ALL__" else combo_slices.get((target, loc), target_slices[target].iloc[0:0])
+        locations_payload = {"__ALL__": {"mae": all_mae, "n": all_n, "trend": all_trend_series}}
+        for loc in location_names:
+            subset_t = combo_slices.get((target, loc), target_slices[target].iloc[0:0])
             mae, n = _board_series(subset_t, board_order, recent_days)
             trend_series = _trend_series(subset_t, trend_order, date_index, rolling_window)
             locations_payload[loc] = {"mae": mae, "n": n, "trend": trend_series}
-        location_data[target] = {"locations": locations_payload}
+        location_data[target] = {
+            "locations": locations_payload,
+            # What the "hide baselines" toggle needs: the bar chart's baseline
+            # entries live inside one trace's arrays (not separate traces), so
+            # hiding them means re-filtering x/y/text/customdata together (never
+            # just x) - the same array-length-mismatch trap the location
+            # dropdown hit with the trend chart. board_categories is the full
+            # label list so JS can filter it by the same mask it applies to the
+            # values, instead of leaving a label with no bar next to it.
+            "board_categories": [_display_name(m) for m in board_order],
+            "baseline_mask_board": [m in BASELINE_STYLE for m in board_order],
+            # The trend chart's baselines are separate traces, so hiding them
+            # is just a per-trace visibility toggle by index.
+            "baseline_trace_indices_trend": [i for i, m in enumerate(trend_order) if m in BASELINE_STYLE],
+        }
 
         board_div = board_fig.to_html(full_html=False, include_plotlyjs=False, div_id=board_id, config={"displayModeBar": False, "responsive": True})
         trend_div = trend_fig.to_html(full_html=False, include_plotlyjs=False, div_id=trend_id, config={"displayModeBar": False, "responsive": True})
@@ -539,7 +646,7 @@ def build_html_report(
     legend_key_entries = [
         *HERO_STYLE.values(),
         *BASELINE_STYLE.values(),
-        {"legend": RAW_SOURCE_LEGEND, "light": _hex_lerp(ORANGE_LIGHT, RED_LIGHT, 0.5)},
+        {"legend": RAW_SOURCE_LEGEND, "light": _hex_lerp(*RAW_SOURCE_GRADIENT_LIGHT, 0.5)},
     ]
     legend_key = "".join(
         f"<span><span class='swatch' style='background:{style['light']}'></span>{escape(style['legend'])}</span>"
@@ -568,6 +675,10 @@ def build_html_report(
       </div>
     </div>
     <div class="controls">
+      <label class="baseline-toggle">
+        <input type="checkbox" id="baseline-toggle" checked>
+        Show baselines
+      </label>
       <select id="location-select" class="location-select">
         <option value="__ALL__">All locations (pooled)</option>
         {location_options}
@@ -580,7 +691,7 @@ def build_html_report(
   <footer>Lower is better for every metric shown, including did_rain (mean absolute error against the 0/1 outcome). Bar/line order stays fixed to the all-locations ranking when you switch locations, so series don't jump around.</footer>
 </div>
 {_theme_script(theme_traces)}
-{_location_script(location_data)}
+{_controls_script(location_data)}
 </body>
 </html>"""
 
