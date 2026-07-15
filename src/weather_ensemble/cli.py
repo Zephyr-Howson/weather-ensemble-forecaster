@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import sys
 from pathlib import Path
 
 from weather_ensemble.config import (
@@ -19,6 +20,7 @@ from weather_ensemble.phases import deploy_all_phases
 from weather_ensemble.report import build_html_report
 from weather_ensemble.scoring import build_predictions_long
 from weather_ensemble.service import (
+    _safe_error,
     backfill,
     blend_forecast,
     collect_forecasts,
@@ -157,8 +159,29 @@ def _write_dataframe(df, path: Path) -> Path:
         return fallback
 
 
-def _run_for_location(args: argparse.Namespace, location: Location) -> None:
+def _guarded(location: Location, step: str, fn) -> bool:
+    """Run one location's step in isolation from every other step and location.
+
+    Mirrors the per-source try/except collect_forecasts already uses (one bad
+    provider shouldn't sink the whole collection run) - but the per-location
+    steps here (record_actual, blend_forecast, train, predict_ml, backtest)
+    previously had no such guard, so a single transient failure (a timeout, an
+    upstream 5xx) for any one of the 30 locations would crash the whole
+    --all-locations run and skip every step - and location - after it,
+    including the report regeneration and the daily commit. A step failing
+    here is logged and the run moves on instead.
+    """
+    try:
+        fn()
+        return True
+    except Exception as exc:
+        print(f"WARN: {step} failed for {location.name}: {_safe_error(exc)}")
+        return False
+
+
+def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
     model_dir = _location_model_dir(args.model_dir, location)
+    ok = True
 
     if args.deploy_phases:
         result = deploy_all_phases(
@@ -170,27 +193,37 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> None:
             train_window_days=args.train_window,
         )
         _print_json(result)
-        return
+        return ok
 
     if args.backfill:
-        backfill(args.db, location, args.backfill)
-        print(f"Backfilled {args.backfill} days for {location.name} into {args.db}")
+        def _backfill():
+            backfill(args.db, location, args.backfill)
+            print(f"Backfilled {args.backfill} days for {location.name} into {args.db}")
+        ok &= _guarded(location, "backfill", _backfill)
 
     if args.collect_open_meteo:
-        records = collect_open_meteo_only(args.db, location)
-        print(f"Collected {len(records)} Open-Meteo model forecast records")
+        def _collect_open_meteo():
+            records = collect_open_meteo_only(args.db, location)
+            print(f"Collected {len(records)} Open-Meteo model forecast records")
+        ok &= _guarded(location, "collect_open_meteo", _collect_open_meteo)
 
     if args.collect or args.all:
-        records = collect_forecasts(args.db, location)
-        print(f"Collected {len(records)} forecast records")
+        def _collect():
+            records = collect_forecasts(args.db, location)
+            print(f"Collected {len(records)} forecast records")
+        ok &= _guarded(location, "collect", _collect)
 
     if args.record_actual or args.all:
-        record_actual(args.db, location)
-        print("Recorded yesterday's actual weather")
+        def _record_actual():
+            record_actual(args.db, location)
+            print("Recorded yesterday's actual weather")
+        ok &= _guarded(location, "record_actual", _record_actual)
 
     if args.forecast or args.all:
-        result = blend_forecast(args.db, location, args.window)
-        _print_json(result)
+        def _forecast():
+            result = blend_forecast(args.db, location, args.window)
+            _print_json(result)
+        ok &= _guarded(location, "blend_forecast", _forecast)
 
     if args.export:
         output = export_modelling_table(args.db, location, args.export)
@@ -202,18 +235,26 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> None:
         print(f"Exported wide ML feature table to {output} ({len(df)} rows, {len(df.columns)} columns)")
 
     if args.train:
-        result = train_models(args.db, location, model_dir, window_days=args.train_window)
-        _print_json(result)
+        def _train():
+            result = train_models(args.db, location, model_dir, window_days=args.train_window)
+            _print_json(result)
+        ok &= _guarded(location, "train", _train)
 
     if args.predict_ml:
-        result = predict_latest_ml(args.db, location, model_dir)
-        _print_json(result)
+        def _predict_ml():
+            result = predict_latest_ml(args.db, location, model_dir)
+            _print_json(result)
+        ok &= _guarded(location, "predict_ml", _predict_ml)
 
     if args.backtest_days:
-        result = backtest_predictions(
-            args.db, location, days=args.backtest_days, ensemble_window_days=args.window, train_window_days=args.train_window
-        )
-        _print_json(result)
+        def _backtest():
+            result = backtest_predictions(
+                args.db, location, days=args.backtest_days, ensemble_window_days=args.window, train_window_days=args.train_window
+            )
+            _print_json(result)
+        ok &= _guarded(location, "backtest", _backtest)
+
+    return ok
 
 
 def main() -> None:
@@ -243,13 +284,30 @@ def main() -> None:
         result = deduplicate(args.db)
         _print_json(result)
 
+    exit_code = 0
     if any(per_location_actions):
         if args.all_locations:
+            failed_locations = []
             for location in AUSTRALIAN_LOCATIONS:
                 print(f"=== {location.name} ===")
-                _run_for_location(args, location)
+                if not _run_for_location(args, location):
+                    failed_locations.append(location.name)
+            if failed_locations:
+                print(
+                    f"WARN: {len(failed_locations)}/{len(AUSTRALIAN_LOCATIONS)} location(s) "
+                    f"had at least one failed step: {', '.join(failed_locations)}"
+                )
+                # A handful of locations hitting a transient error is expected
+                # from time to time and shouldn't fail the whole run (the other
+                # locations' data, the report, and the daily commit are still
+                # good and shouldn't be thrown away) - but every location
+                # failing points at something systemic (bad credentials, an
+                # outage) that's worth actually failing loudly for.
+                if len(failed_locations) == len(AUSTRALIAN_LOCATIONS):
+                    exit_code = 1
         else:
-            _run_for_location(args, _location_from_args(args))
+            if not _run_for_location(args, _location_from_args(args)):
+                exit_code = 1
 
     if args.accuracy_report:
         locations = AUSTRALIAN_LOCATIONS if args.all_locations else [_location_from_args(args)]
@@ -262,6 +320,9 @@ def main() -> None:
             history_days=args.report_history_days,
         )
         print(f"Wrote accuracy report to {output} ({len(long_df)} scored rows across {len(locations)} location(s))")
+
+    if exit_code:
+        sys.exit(exit_code)
 
 
 if __name__ == "__main__":
