@@ -14,6 +14,8 @@ from weather_ensemble.config import (
 )
 from weather_ensemble.ml import build_feature_table, predict_latest_ml, train_models
 from weather_ensemble.phases import deploy_all_phases
+from weather_ensemble.report import build_html_report
+from weather_ensemble.scoring import build_predictions_long
 from weather_ensemble.service import (
     backfill,
     blend_forecast,
@@ -97,6 +99,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Repeat the requested actions for every location in AUSTRALIAN_LOCATIONS "
         "instead of a single --lat/--lon location",
     )
+
+    parser.add_argument(
+        "--accuracy-report",
+        type=Path,
+        metavar="PATH",
+        help="Write an interactive HTML report scoring ensemble/ML/individual sources/baselines "
+        "against actuals over time (pools every location when combined with --all-locations)",
+    )
+    parser.add_argument(
+        "--report-window",
+        type=int,
+        default=7,
+        help="Rolling window (days) for the accuracy-over-time chart (default 7)",
+    )
+    parser.add_argument(
+        "--report-recent-days",
+        type=int,
+        default=30,
+        help="Lookback window (days) for the leaderboard summary (default 30)",
+    )
+    parser.add_argument(
+        "--report-history-days",
+        type=int,
+        default=90,
+        help="How far back every chart in the accuracy report goes (default 90, ~3 months)",
+    )
     return parser
 
 
@@ -171,30 +199,43 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
 
-    if not any(
-        [
-            args.backfill,
-            args.collect,
-            args.collect_open_meteo,
-            args.record_actual,
-            args.forecast,
-            args.all,
-            args.export,
-            args.build_dataset,
-            args.train,
-            args.predict_ml,
-            args.deploy_phases,
-        ]
-    ):
+    per_location_actions = [
+        args.backfill,
+        args.collect,
+        args.collect_open_meteo,
+        args.record_actual,
+        args.forecast,
+        args.all,
+        args.export,
+        args.build_dataset,
+        args.train,
+        args.predict_ml,
+        args.deploy_phases,
+    ]
+
+    if not any(per_location_actions) and not args.accuracy_report:
         parser.print_help()
         return
 
-    if args.all_locations:
-        for location in AUSTRALIAN_LOCATIONS:
-            print(f"=== {location.name} ===")
-            _run_for_location(args, location)
-    else:
-        _run_for_location(args, _location_from_args(args))
+    if any(per_location_actions):
+        if args.all_locations:
+            for location in AUSTRALIAN_LOCATIONS:
+                print(f"=== {location.name} ===")
+                _run_for_location(args, location)
+        else:
+            _run_for_location(args, _location_from_args(args))
+
+    if args.accuracy_report:
+        locations = AUSTRALIAN_LOCATIONS if args.all_locations else [_location_from_args(args)]
+        long_df = build_predictions_long(args.db, locations)
+        output = build_html_report(
+            long_df,
+            args.accuracy_report,
+            rolling_window=args.report_window,
+            recent_days=args.report_recent_days,
+            history_days=args.report_history_days,
+        )
+        print(f"Wrote accuracy report to {output} ({len(long_df)} scored rows across {len(locations)} location(s))")
 
 
 if __name__ == "__main__":

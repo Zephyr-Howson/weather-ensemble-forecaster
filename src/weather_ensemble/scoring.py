@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pandas as pd
+
+from weather_ensemble import db
+from weather_ensemble.config import RAIN_THRESHOLD_MM, TARGETS, Location
+from weather_ensemble.service import load_modelling_table
+
+BASELINE_PERSISTENCE = "baseline_persistence"
+BASELINE_CLIMATOLOGY = "baseline_climatology"
+MODEL_ENSEMBLE = "ensemble"
+MODEL_ML = "ml"
+
+CONTINUOUS_TARGETS = [t for t in TARGETS if t != "did_rain"]
+
+# Every prediction in this project (raw source, ensemble, ML) is made exactly
+# one day ahead of the date it's for - collect_forecasts/blend_forecast/
+# predict_latest_ml all target "tomorrow" and run once a day. So unlike a
+# typical forecast-accuracy setup, there's no lead-time bucketing to worry
+# about here: every row scored below is a same lead-time (1-day-ahead) forecast.
+
+
+def _long_rows_from_wide(
+    wide: pd.DataFrame, model_col: str, date_col: str, source_prefix: str | None = None
+) -> list[dict]:
+    """Melt a wide (one row per prediction) frame into long predicted/actual rows."""
+    rows: list[dict] = []
+    for _, r in wide.iterrows():
+        model = r[model_col] if source_prefix is None else source_prefix
+        for target in TARGETS:
+            actual_col = f"actual_{target}"
+            if actual_col not in wide.columns:
+                continue
+            actual = r.get(actual_col)
+            if pd.isna(actual):
+                continue
+
+            if target == "did_rain" and target not in wide.columns:
+                # Raw provider forecasts don't carry did_rain directly - derive it
+                # from precipitation_sum using the same threshold actuals use.
+                precip = r.get("precipitation_sum")
+                if pd.isna(precip):
+                    continue
+                predicted = float(precip >= RAIN_THRESHOLD_MM)
+            else:
+                predicted = r.get(target)
+                if pd.isna(predicted):
+                    continue
+                predicted = float(predicted)
+
+            rows.append(
+                {
+                    "model": model,
+                    "location_name": r["location_name"],
+                    "forecast_date": r[date_col],
+                    "target": target,
+                    "predicted": predicted,
+                    "actual": float(actual),
+                }
+            )
+    return rows
+
+
+def _source_predictions(db_path: Path, location: Location) -> list[dict]:
+    wide = load_modelling_table(db_path, location)
+    if wide.empty:
+        return []
+    return _long_rows_from_wide(wide, model_col="source", date_col="forecast_date")
+
+
+def _ensemble_predictions(db_path: Path, location: Location) -> list[dict]:
+    with db.connect(db_path) as conn:
+        wide = pd.read_sql_query(
+            """
+            WITH latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY location_name, forecast_date ORDER BY generated_at DESC
+                ) AS rn
+                FROM ensemble_predictions
+                WHERE location_name = ?
+            )
+            SELECT e.location_name, e.forecast_date, e.max_temp, e.min_temp,
+                   e.precipitation_sum, e.did_rain, e.uv_index, e.wind_speed, e.wind_gusts,
+                   a.max_temp AS actual_max_temp, a.min_temp AS actual_min_temp,
+                   a.precipitation_sum AS actual_precipitation_sum, a.did_rain AS actual_did_rain,
+                   a.uv_index AS actual_uv_index, a.wind_speed AS actual_wind_speed,
+                   a.wind_gusts AS actual_wind_gusts
+            FROM latest e
+            JOIN actuals a ON a.location_name = e.location_name AND a.actual_date = e.forecast_date
+            WHERE e.rn = 1
+            """,
+            conn,
+            params=(location.name,),
+        )
+    if wide.empty:
+        return []
+    return _long_rows_from_wide(wide, model_col="", date_col="forecast_date", source_prefix=MODEL_ENSEMBLE)
+
+
+def _ml_predictions(db_path: Path, location: Location) -> list[dict]:
+    with db.connect(db_path) as conn:
+        wide = pd.read_sql_query(
+            """
+            WITH latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY location_name, forecast_date ORDER BY generated_at DESC
+                ) AS rn
+                FROM ml_predictions
+                WHERE location_name = ?
+            )
+            SELECT m.location_name, m.forecast_date, m.max_temp, m.min_temp,
+                   m.precipitation_sum, m.did_rain, m.uv_index, m.wind_speed, m.wind_gusts,
+                   a.max_temp AS actual_max_temp, a.min_temp AS actual_min_temp,
+                   a.precipitation_sum AS actual_precipitation_sum, a.did_rain AS actual_did_rain,
+                   a.uv_index AS actual_uv_index, a.wind_speed AS actual_wind_speed,
+                   a.wind_gusts AS actual_wind_gusts
+            FROM latest m
+            JOIN actuals a ON a.location_name = m.location_name AND a.actual_date = m.forecast_date
+            WHERE m.rn = 1
+            """,
+            conn,
+            params=(location.name,),
+        )
+    if wide.empty:
+        return []
+    return _long_rows_from_wide(wide, model_col="", date_col="forecast_date", source_prefix=MODEL_ML)
+
+
+def _baseline_predictions(
+    db_path: Path, location: Location, climatology_window: int = 30, climatology_min_periods: int = 7
+) -> list[dict]:
+    """Persistence ("tomorrow = today") and trailing-average climatology baselines.
+
+    Both are derived purely from the actuals history (no forecast needed), using
+    only data strictly before the date being predicted so this can't leak the
+    answer into its own baseline. With only a few months of history so far,
+    climatology uses a trailing rolling mean rather than a true day-of-year
+    seasonal average; once a year-plus of actuals accumulate, this window can
+    be swapped for a same-day-of-year lookup.
+    """
+    with db.connect(db_path) as conn:
+        actuals = pd.read_sql_query(
+            "SELECT location_name, actual_date, max_temp, min_temp, precipitation_sum, "
+            "did_rain, uv_index, wind_speed, wind_gusts FROM actuals "
+            "WHERE location_name = ? ORDER BY actual_date",
+            conn,
+            params=(location.name,),
+        )
+    if actuals.empty:
+        return []
+
+    rows: list[dict] = []
+    for target in TARGETS:
+        if target not in actuals.columns:
+            continue
+        series = actuals[target].astype(float)
+        persistence = series.shift(1)
+        climatology = series.rolling(window=climatology_window, min_periods=climatology_min_periods).mean().shift(1)
+
+        for model, predicted_series in ((BASELINE_PERSISTENCE, persistence), (BASELINE_CLIMATOLOGY, climatology)):
+            for idx, predicted in predicted_series.items():
+                actual = series.iloc[idx]
+                if pd.isna(predicted) or pd.isna(actual):
+                    continue
+                rows.append(
+                    {
+                        "model": model,
+                        "location_name": location.name,
+                        "forecast_date": actuals["actual_date"].iloc[idx],
+                        "target": target,
+                        "predicted": float(predicted),
+                        "actual": float(actual),
+                    }
+                )
+    return rows
+
+
+def build_predictions_long(db_path: Path, locations: list[Location]) -> pd.DataFrame:
+    """One row per (model, location, date, target) with a predicted/actual pair.
+
+    `model` ranges over every raw forecast source, plus 'ensemble', 'ml', and the
+    two baselines. This is the single table every rollup (rolling accuracy over
+    time, leaderboards) in this module is built from.
+    """
+    rows: list[dict] = []
+    for location in locations:
+        rows.extend(_source_predictions(db_path, location))
+        rows.extend(_ensemble_predictions(db_path, location))
+        rows.extend(_ml_predictions(db_path, location))
+        rows.extend(_baseline_predictions(db_path, location))
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["forecast_date"] = pd.to_datetime(df["forecast_date"])
+    df["abs_error"] = (df["predicted"] - df["actual"]).abs()
+    df["error"] = df["predicted"] - df["actual"]
+    return df
+
+
+def rolling_error_over_time(long_df: pd.DataFrame, window: int = 7) -> pd.DataFrame:
+    """Rolling mean absolute error per (target, model) over time, pooled across locations.
+
+    Errors from every location on a given date are averaged first (one point per
+    date), then smoothed with a trailing `window`-day rolling mean - this is what
+    the "accuracy over time" chart plots.
+    """
+    if long_df.empty:
+        return long_df
+
+    daily = (
+        long_df.groupby(["target", "model", "forecast_date"])["abs_error"]
+        .mean()
+        .reset_index()
+        .sort_values("forecast_date")
+    )
+
+    out = []
+    for (target, model), group in daily.groupby(["target", "model"]):
+        group = group.sort_values("forecast_date").copy()
+        group["rolling_mae"] = group["abs_error"].rolling(window=window, min_periods=1).mean()
+        out.append(group)
+    return pd.concat(out, ignore_index=True) if out else daily
+
+
+def leaderboard(long_df: pd.DataFrame, recent_days: int | None = 30) -> pd.DataFrame:
+    """Mean absolute error per (target, model), most recent first, best (lowest) ranked first.
+
+    For 'did_rain' this is the mean absolute error against the 0/1 outcome (a
+    Brier-like score for models that emit a probability, and a plain error rate
+    for models that emit a hard 0/1 class) - lower is better for every target,
+    including did_rain, so all rows can be read the same way.
+    """
+    if long_df.empty:
+        return long_df
+
+    scoped = long_df
+    if recent_days is not None:
+        cutoff = long_df["forecast_date"].max() - pd.Timedelta(days=recent_days)
+        scoped = long_df[long_df["forecast_date"] > cutoff]
+
+    summary = (
+        scoped.groupby(["target", "model"])["abs_error"]
+        .agg(mae="mean", n="count")
+        .reset_index()
+        .sort_values(["target", "mae"])
+    )
+    return summary

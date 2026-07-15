@@ -1,0 +1,482 @@
+from __future__ import annotations
+
+import json
+from datetime import datetime
+from html import escape
+from pathlib import Path
+
+import pandas as pd
+import plotly.graph_objects as go
+
+from weather_ensemble.config import TARGETS
+from weather_ensemble.scoring import (
+    BASELINE_CLIMATOLOGY,
+    BASELINE_PERSISTENCE,
+    MODEL_ENSEMBLE,
+    MODEL_ML,
+    leaderboard,
+    rolling_error_over_time,
+)
+from weather_ensemble.sources import FORECAST_SOURCES
+
+TARGET_LABELS = {
+    "max_temp": "Max temperature",
+    "min_temp": "Min temperature",
+    "precipitation_sum": "Precipitation",
+    "did_rain": "Did it rain (0/1 error)",
+    "uv_index": "UV index",
+    "wind_speed": "Wind speed",
+    "wind_gusts": "Wind gusts",
+}
+
+# Reference palette (see dataviz skill, references/palette.md). Ensemble/ML -
+# the two models this report is actually about - get the palette's blue/green
+# categorical slots, painted solid and on top. Baselines are grey, dashed
+# reference lines rather than competing series. Individual raw provider
+# sources are deliberately NOT flat gray: each gets its own shade along a
+# fixed orange->red gradient (the palette's own orange/red categorical steps
+# as endpoints) so they stay visually distinguishable while still reading as
+# one de-emphasized "family" behind the hero lines. The gradient position is
+# assigned by each source's fixed position in FORECAST_SOURCES (identity, not
+# by current error rank) so a source never changes shade because it started
+# winning or losing - see the "recolor-on-filter" anti-pattern.
+HERO_STYLE = {
+    MODEL_ENSEMBLE: {
+        "legend": "Ensemble (weighted blend)",
+        "light": "#2a78d6",
+        "dark": "#3987e5",
+        "dash": "solid",
+        "width": 2.5,
+        "opacity": 1.0,
+    },
+    MODEL_ML: {
+        "legend": "ML model",
+        "light": "#008300",
+        "dark": "#008300",
+        "dash": "solid",
+        "width": 2.5,
+        "opacity": 1.0,
+    },
+}
+
+BASELINE_STYLE = {
+    BASELINE_PERSISTENCE: {
+        "legend": "Baseline: persistence",
+        "light": "#52514e",
+        "dark": "#c3c2b7",
+        "dash": "dash",
+        "width": 1.75,
+        "opacity": 0.95,
+    },
+    BASELINE_CLIMATOLOGY: {
+        "legend": "Baseline: 30d trailing average",
+        "light": "#52514e",
+        "dark": "#c3c2b7",
+        "dash": "dot",
+        "width": 1.75,
+        "opacity": 0.95,
+    },
+}
+
+RAW_SOURCE_LEGEND = "Individual forecast sources"
+RAW_SOURCE_BASE_STYLE = {"dash": "solid", "width": 1.5, "opacity": 0.8}
+RAW_SOURCE_ORDER = list(FORECAST_SOURCES.keys())
+ORANGE_LIGHT, RED_LIGHT = "#eb6834", "#e34948"
+ORANGE_DARK, RED_DARK = "#d95926", "#e66767"
+
+# Paint order (traces added in this order so the models the report is about
+# render on top of the de-emphasized context lines behind them).
+_Z_ORDER = {MODEL_ENSEMBLE: 3, MODEL_ML: 4, BASELINE_PERSISTENCE: 1, BASELINE_CLIMATOLOGY: 1}
+
+
+def _z_key(model: str) -> tuple[int, str]:
+    return (_Z_ORDER.get(model, 0), model)
+
+
+CHROME = {
+    "light": {"font": "#52514e", "grid": "#e1e0d9", "axis": "#c3c2b7"},
+    "dark": {"font": "#c3c2b7", "grid": "#2c2c2a", "axis": "#383835"},
+}
+
+
+def _hex_lerp(c1: str, c2: str, t: float) -> str:
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    r = round(r1 + (r2 - r1) * t)
+    g = round(g1 + (g2 - g1) * t)
+    b = round(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _raw_source_colors(models: set[str]) -> dict[str, dict[str, str]]:
+    order = [m for m in RAW_SOURCE_ORDER if m in models]
+    order += sorted(m for m in models if m not in RAW_SOURCE_ORDER)
+    n = len(order)
+    colors = {}
+    for i, name in enumerate(order):
+        t = i / (n - 1) if n > 1 else 0.0
+        colors[name] = {"light": _hex_lerp(ORANGE_LIGHT, RED_LIGHT, t), "dark": _hex_lerp(ORANGE_DARK, RED_DARK, t)}
+    return colors
+
+
+def _style_for(model: str, raw_colors: dict[str, dict[str, str]]) -> dict:
+    if model in HERO_STYLE:
+        return HERO_STYLE[model]
+    if model in BASELINE_STYLE:
+        return BASELINE_STYLE[model]
+    colors = raw_colors.get(model, {"light": ORANGE_LIGHT, "dark": ORANGE_DARK})
+    return {"legend": RAW_SOURCE_LEGEND, **RAW_SOURCE_BASE_STYLE, **colors}
+
+
+def _display_name(model: str) -> str:
+    if model.startswith("open_meteo_"):
+        return "Open-Meteo: " + model.removeprefix("open_meteo_").replace("_", " ")
+    if model in HERO_STYLE:
+        return HERO_STYLE[model]["legend"]
+    if model in BASELINE_STYLE:
+        return BASELINE_STYLE[model]["legend"]
+    return model.replace("_", " ")
+
+
+def _axis_layout(fig: go.Figure) -> None:
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif", color=CHROME["light"]["font"], size=13),
+        margin=dict(l=8, r=48, t=8, b=36),
+        showlegend=False,
+    )
+    fig.update_xaxes(gridcolor=CHROME["light"]["grid"], linecolor=CHROME["light"]["axis"], zeroline=False, showgrid=True)
+    fig.update_yaxes(gridcolor=CHROME["light"]["grid"], linecolor=CHROME["light"]["axis"], zeroline=False, showgrid=False)
+
+
+def _leaderboard_figure(board_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]) -> tuple[go.Figure, list[str], list[str]]:
+    board_t = board_t.sort_values("mae", ascending=True)
+    colors_light = [_style_for(m, raw_colors)["light"] for m in board_t["model"]]
+    colors_dark = [_style_for(m, raw_colors)["dark"] for m in board_t["model"]]
+
+    fig = go.Figure(
+        go.Bar(
+            x=board_t["mae"],
+            y=[_display_name(m) for m in board_t["model"]],
+            orientation="h",
+            marker_color=colors_light,
+            text=[f"{v:.2f}" for v in board_t["mae"]],
+            textposition="outside",
+            cliponaxis=False,
+            customdata=board_t["n"],
+            hovertemplate="<b>%{x:.3f}</b> MAE  (n=%{customdata})<extra>%{y}</extra>",
+        )
+    )
+    _axis_layout(fig)
+    fig.update_xaxes(title_text="Mean absolute error (lower is better)")
+    n_bars = max(len(board_t), 1)
+    fig.update_layout(height=34 * n_bars + 60)
+    return fig, colors_light, colors_dark
+
+
+def _trend_figure(trend_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]) -> tuple[go.Figure, list[str], list[str]]:
+    fig = go.Figure()
+    colors_light: list[str] = []
+    colors_dark: list[str] = []
+    legend_seen: set[str] = set()
+
+    for model in sorted(trend_t["model"].unique(), key=_z_key):
+        style = _style_for(model, raw_colors)
+        group = trend_t[trend_t["model"] == model].sort_values("forecast_date")
+        show = style["legend"] not in legend_seen
+        legend_seen.add(style["legend"])
+        fig.add_trace(
+            go.Scatter(
+                x=group["forecast_date"],
+                y=group["rolling_mae"],
+                mode="lines",
+                name=style["legend"],
+                legendgroup=style["legend"],
+                showlegend=show,
+                opacity=style["opacity"],
+                line=dict(color=style["light"], width=style["width"], dash=style["dash"]),
+                hovertemplate=f"{escape(_display_name(model))}: %{{y:.3f}}<extra></extra>",
+            )
+        )
+        colors_light.append(style["light"])
+        colors_dark.append(style["dark"])
+
+    _axis_layout(fig)
+    fig.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11)))
+    fig.update_layout(hovermode="x unified", height=300, margin=dict(l=48, r=16, t=48, b=36))
+    fig.update_yaxes(title_text="rolling MAE", showgrid=True)
+    return fig, colors_light, colors_dark
+
+
+def _table_view(board_t: pd.DataFrame) -> str:
+    rows = []
+    for _, r in board_t.sort_values("mae").iterrows():
+        rows.append(
+            f"<tr><td>{escape(_display_name(r['model']))}</td>"
+            f"<td class='num'>{r['mae']:.3f}</td><td class='num'>{int(r['n'])}</td></tr>"
+        )
+    return (
+        "<details class='table-view'><summary>Table view</summary>"
+        "<table><thead><tr><th>Model</th><th class='num'>MAE</th><th class='num'>n</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody></table></details>"
+    )
+
+
+_PAGE_CSS = """
+:root {
+  color-scheme: light;
+  --surface-1: #fcfcfb;
+  --page-plane: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --border: rgba(11,11,11,0.10);
+}
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page-plane: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --border: rgba(255,255,255,0.10);
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page-plane: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --text-muted: #898781;
+  --border: rgba(255,255,255,0.10);
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--page-plane);
+  color: var(--text-primary);
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+.wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; }
+
+header.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 28px; }
+header.top h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
+header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
+.chip-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+.chip {
+  font-size: 12px; color: var(--text-secondary); background: var(--surface-1);
+  border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px;
+}
+
+.theme-toggle {
+  border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
+  border-radius: 8px; padding: 7px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+}
+.theme-toggle:hover { color: var(--text-primary); }
+
+.legend-key { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 22px; font-size: 12.5px; color: var(--text-secondary); }
+.legend-key span.swatch { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 18px 20px 8px;
+  margin-bottom: 18px;
+}
+.card h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
+.card .sub { font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
+.card .panels { display: grid; grid-template-columns: minmax(220px, 0.85fr) minmax(320px, 1.6fr); gap: 8px 20px; }
+@media (max-width: 860px) { .card .panels { grid-template-columns: 1fr; } }
+
+details.table-view { margin: 4px 0 14px; }
+details.table-view summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); }
+details.table-view table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12.5px; }
+details.table-view th, details.table-view td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+details.table-view td.num, details.table-view th.num { text-align: right; font-variant-numeric: tabular-nums; }
+
+footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
+.empty { color: var(--text-secondary); padding: 40px 0; text-align: center; }
+"""
+
+
+def _theme_script(theme_traces: dict) -> str:
+    return f"""
+<script>
+window.__THEME_TRACES = {json.dumps(theme_traces)};
+function applyPlotlyTheme(dark) {{
+  var chrome = dark
+    ? {{font: "{CHROME['dark']['font']}", grid: "{CHROME['dark']['grid']}", axis: "{CHROME['dark']['axis']}"}}
+    : {{font: "{CHROME['light']['font']}", grid: "{CHROME['light']['grid']}", axis: "{CHROME['light']['axis']}"}};
+  document.querySelectorAll(".js-plotly-plot").forEach(function (div) {{
+    var spec = window.__THEME_TRACES[div.id];
+    if (spec) {{
+      var colors = dark ? spec.dark : spec.light;
+      if (spec.kind === "bar") {{
+        Plotly.restyle(div, {{"marker.color": [colors]}});
+      }} else {{
+        Plotly.restyle(div, {{"line.color": colors}});
+      }}
+    }}
+    Plotly.relayout(div, {{
+      "font.color": chrome.font,
+      "xaxis.gridcolor": chrome.grid, "yaxis.gridcolor": chrome.grid,
+      "xaxis.linecolor": chrome.axis, "yaxis.linecolor": chrome.axis,
+    }});
+  }});
+}}
+function currentTheme() {{
+  var stored = localStorage.getItem("weather-report-theme");
+  if (stored) return stored;
+  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+}}
+function setTheme(theme) {{
+  document.documentElement.setAttribute("data-theme", theme);
+  localStorage.setItem("weather-report-theme", theme);
+  applyPlotlyTheme(theme === "dark");
+  var btn = document.getElementById("theme-toggle");
+  if (btn) btn.textContent = theme === "dark" ? "Light mode" : "Dark mode";
+}}
+document.addEventListener("DOMContentLoaded", function () {{
+  setTheme(currentTheme());
+  var media = window.matchMedia("(prefers-color-scheme: dark)");
+  media.addEventListener("change", function (e) {{
+    if (!localStorage.getItem("weather-report-theme")) setTheme(e.matches ? "dark" : "light");
+  }});
+  var btn = document.getElementById("theme-toggle");
+  if (btn) {{
+    btn.addEventListener("click", function () {{
+      setTheme(document.documentElement.getAttribute("data-theme") === "dark" ? "light" : "dark");
+    }});
+  }}
+}});
+</script>
+"""
+
+
+def build_html_report(
+    long_df: pd.DataFrame,
+    output_path: Path,
+    rolling_window: int = 7,
+    recent_days: int = 30,
+    history_days: int = 90,
+    title: str = "Weather forecast accuracy",
+) -> Path:
+    """Render a self-contained interactive HTML report.
+
+    Every chart is scoped to the last `history_days` (default ~3 months). One
+    card per target variable: a leaderboard (mean absolute error over the last
+    `recent_days`) and a rolling `rolling_window`-day MAE-over-time line chart,
+    plus a plain-HTML table twin of the leaderboard. The ensemble and ML model
+    are drawn in their own colors and painted on top; every raw provider
+    source gets its own shade along a fixed orange->red gradient (de-emphasized
+    via opacity/width) so they stay distinguishable without competing with the
+    two models this report is actually about, and the two baselines are grey,
+    dashed/dotted reference lines rather than competing series.
+    """
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not long_df.empty:
+        cutoff = long_df["forecast_date"].max() - pd.Timedelta(days=history_days)
+        long_df = long_df[long_df["forecast_date"] > cutoff]
+
+    if long_df.empty:
+        html = f"""<!doctype html><html><head><meta charset="utf-8"><title>{escape(title)}</title>
+<style>{_PAGE_CSS}</style></head><body><div class="wrap">
+<header class="top"><div><h1>{escape(title)}</h1><p>No scored predictions yet.</p></div></header>
+<div class="empty">Run the pipeline for a few days to accumulate forecasts and actuals, then regenerate this report.</div>
+</div></body></html>"""
+        output_path.write_text(html, encoding="utf-8")
+        return output_path
+
+    recent_days = min(recent_days, history_days)
+    board = leaderboard(long_df, recent_days=recent_days)
+    trend = rolling_error_over_time(long_df, window=rolling_window)
+    targets = [t for t in TARGETS if t in long_df["target"].unique()]
+    raw_colors = _raw_source_colors(
+        {m for m in long_df["model"].unique() if m not in HERO_STYLE and m not in BASELINE_STYLE}
+    )
+
+    theme_traces: dict[str, dict] = {}
+    cards = []
+    for target in targets:
+        board_t = board[board["target"] == target]
+        trend_t = trend[trend["target"] == target]
+        if board_t.empty or trend_t.empty:
+            continue
+
+        board_id = f"board-{target}"
+        trend_id = f"trend-{target}"
+        board_fig, board_light, board_dark = _leaderboard_figure(board_t, raw_colors)
+        trend_fig, trend_light, trend_dark = _trend_figure(trend_t, raw_colors)
+        theme_traces[board_id] = {"kind": "bar", "light": board_light, "dark": board_dark}
+        theme_traces[trend_id] = {"kind": "line", "light": trend_light, "dark": trend_dark}
+
+        board_div = board_fig.to_html(full_html=False, include_plotlyjs=False, div_id=board_id, config={"displayModeBar": False, "responsive": True})
+        trend_div = trend_fig.to_html(full_html=False, include_plotlyjs=False, div_id=trend_id, config={"displayModeBar": False, "responsive": True})
+
+        cards.append(
+            f"""<section class="card">
+  <h2>{escape(TARGET_LABELS.get(target, target))}</h2>
+  <p class="sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time</p>
+  <div class="panels">
+    <div>{board_div}{_table_view(board_t)}</div>
+    <div>{trend_div}</div>
+  </div>
+</section>"""
+        )
+
+    n_locations = long_df["location_name"].nunique()
+    date_min = long_df["forecast_date"].min().date()
+    date_max = long_df["forecast_date"].max().date()
+    generated = datetime.now().isoformat(timespec="minutes")
+
+    legend_key_entries = [
+        *HERO_STYLE.values(),
+        *BASELINE_STYLE.values(),
+        {"legend": RAW_SOURCE_LEGEND, "light": _hex_lerp(ORANGE_LIGHT, RED_LIGHT, 0.5)},
+    ]
+    legend_key = "".join(
+        f"<span><span class='swatch' style='background:{style['light']}'></span>{escape(style['legend'])}</span>"
+        for style in legend_key_entries
+    )
+
+    html = f"""<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(title)}</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>{_PAGE_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <div>
+      <h1>{escape(title)}</h1>
+      <p>Ensemble and ML predictions scored against observed weather, alongside every individual forecast source and two naive baselines.</p>
+      <div class="chip-row">
+        <span class="chip">{n_locations} location(s) pooled</span>
+        <span class="chip">last {history_days}d &middot; {date_min} &rarr; {date_max}</span>
+        <span class="chip">generated {generated}</span>
+      </div>
+    </div>
+    <button id="theme-toggle" class="theme-toggle" type="button">Dark mode</button>
+  </header>
+  <div class="legend-key">{legend_key}</div>
+  {''.join(cards)}
+  <footer>Lower is better for every metric shown, including did_rain (mean absolute error against the 0/1 outcome).</footer>
+</div>
+{_theme_script(theme_traces)}
+</body>
+</html>"""
+
+    output_path.write_text(html, encoding="utf-8")
+    return output_path
