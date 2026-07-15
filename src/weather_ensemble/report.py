@@ -150,15 +150,18 @@ def _axis_layout(fig: go.Figure) -> None:
     fig.update_yaxes(gridcolor=CHROME["light"]["grid"], linecolor=CHROME["light"]["axis"], zeroline=False, showgrid=False)
 
 
-def _leaderboard_figure(board_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]) -> tuple[go.Figure, list[str], list[str]]:
+def _leaderboard_figure(
+    board_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]
+) -> tuple[go.Figure, list[str], list[str], list[str]]:
     board_t = board_t.sort_values("mae", ascending=True)
-    colors_light = [_style_for(m, raw_colors)["light"] for m in board_t["model"]]
-    colors_dark = [_style_for(m, raw_colors)["dark"] for m in board_t["model"]]
+    model_order = board_t["model"].tolist()
+    colors_light = [_style_for(m, raw_colors)["light"] for m in model_order]
+    colors_dark = [_style_for(m, raw_colors)["dark"] for m in model_order]
 
     fig = go.Figure(
         go.Bar(
             x=board_t["mae"],
-            y=[_display_name(m) for m in board_t["model"]],
+            y=[_display_name(m) for m in model_order],
             orientation="h",
             marker_color=colors_light,
             text=[f"{v:.2f}" for v in board_t["mae"]],
@@ -169,19 +172,23 @@ def _leaderboard_figure(board_t: pd.DataFrame, raw_colors: dict[str, dict[str, s
         )
     )
     _axis_layout(fig)
-    fig.update_xaxes(title_text="Mean absolute error (lower is better)")
+    fig.update_xaxes(title_text="MAE")
+    fig.update_yaxes(autorange="reversed")
     n_bars = max(len(board_t), 1)
     fig.update_layout(height=34 * n_bars + 60)
-    return fig, colors_light, colors_dark
+    return fig, colors_light, colors_dark, model_order
 
 
-def _trend_figure(trend_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]) -> tuple[go.Figure, list[str], list[str]]:
+def _trend_figure(
+    trend_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]
+) -> tuple[go.Figure, list[str], list[str], list[str]]:
     fig = go.Figure()
     colors_light: list[str] = []
     colors_dark: list[str] = []
     legend_seen: set[str] = set()
+    model_order = sorted(trend_t["model"].unique(), key=_z_key)
 
-    for model in sorted(trend_t["model"].unique(), key=_z_key):
+    for model in model_order:
         style = _style_for(model, raw_colors)
         group = trend_t[trend_t["model"] == model].sort_values("forecast_date")
         show = style["legend"] not in legend_seen
@@ -206,7 +213,32 @@ def _trend_figure(trend_t: pd.DataFrame, raw_colors: dict[str, dict[str, str]]) 
     fig.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11)))
     fig.update_layout(hovermode="x unified", height=300, margin=dict(l=48, r=16, t=48, b=36))
     fig.update_yaxes(title_text="rolling MAE", showgrid=True)
-    return fig, colors_light, colors_dark
+    return fig, colors_light, colors_dark, model_order
+
+
+def _board_series(subset_t: pd.DataFrame, model_order: list[str], recent_days: int) -> tuple[list, list]:
+    """Per-model MAE/n for one location, reindexed onto a shared, fixed model order."""
+    if subset_t.empty:
+        return [None] * len(model_order), [0] * len(model_order)
+    rows = {row["model"]: (row["mae"], int(row["n"])) for _, row in leaderboard(subset_t, recent_days=recent_days).iterrows()}
+    mae = [round(rows[m][0], 4) if m in rows else None for m in model_order]
+    n = [rows[m][1] if m in rows else 0 for m in model_order]
+    return mae, n
+
+
+def _trend_series(subset_t: pd.DataFrame, model_order: list[str], date_index: list[str], window: int) -> list[list]:
+    """Per-model rolling MAE for one location, reindexed onto a shared date axis and model order."""
+    series = {m: [None] * len(date_index) for m in model_order}
+    if not subset_t.empty:
+        date_pos = {d: i for i, d in enumerate(date_index)}
+        for model, group in rolling_error_over_time(subset_t, window=window).groupby("model"):
+            if model not in series:
+                continue
+            for _, r in group.iterrows():
+                pos = date_pos.get(r["forecast_date"].date().isoformat())
+                if pos is not None:
+                    series[model][pos] = round(float(r["rolling_mae"]), 4)
+    return [series[m] for m in model_order]
 
 
 def _table_view(board_t: pd.DataFrame) -> str:
@@ -273,11 +305,13 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px;
 }
 
-.theme-toggle {
+.controls { display: flex; gap: 8px; align-items: center; }
+.theme-toggle, .location-select {
   border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
   border-radius: 8px; padding: 7px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
 }
 .theme-toggle:hover { color: var(--text-primary); }
+.location-select { font-family: inherit; }
 
 .legend-key { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 22px; font-size: 12.5px; color: var(--text-secondary); }
 .legend-key span.swatch { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
@@ -359,6 +393,47 @@ document.addEventListener("DOMContentLoaded", function () {{
 """
 
 
+def _location_script(location_data: dict) -> str:
+    return f"""
+<script>
+window.__LOCATION_DATA = {json.dumps(location_data)};
+function applyLocation(loc) {{
+  Object.keys(window.__LOCATION_DATA).forEach(function (target) {{
+    var spec = window.__LOCATION_DATA[target];
+    var locData = spec.locations[loc] || spec.locations["__ALL__"];
+    var boardDiv = document.getElementById("board-" + target);
+    if (boardDiv && locData) {{
+      Plotly.restyle(boardDiv, {{
+        x: [locData.mae],
+        text: [locData.mae.map(function (v) {{ return v === null ? "" : v.toFixed(2); }})],
+        customdata: [locData.n],
+      }});
+    }}
+    var trendDiv = document.getElementById("trend-" + target);
+    if (trendDiv && locData) {{
+      Plotly.restyle(trendDiv, {{y: locData.trend}});
+    }}
+  }});
+  var chip = document.getElementById("location-chip");
+  if (chip) chip.textContent = loc === "__ALL__" ? "all locations pooled" : "viewing " + loc;
+  localStorage.setItem("weather-report-location", loc);
+}}
+document.addEventListener("DOMContentLoaded", function () {{
+  var select = document.getElementById("location-select");
+  if (!select) return;
+  var stored = localStorage.getItem("weather-report-location");
+  var hasOption = false;
+  for (var i = 0; i < select.options.length; i++) {{
+    if (select.options[i].value === stored) {{ hasOption = true; break; }}
+  }}
+  if (hasOption) select.value = stored;
+  applyLocation(select.value);
+  select.addEventListener("change", function () {{ applyLocation(select.value); }});
+}});
+</script>
+"""
+
+
 def build_html_report(
     long_df: pd.DataFrame,
     output_path: Path,
@@ -403,7 +478,18 @@ def build_html_report(
         {m for m in long_df["model"].unique() if m not in HERO_STYLE and m not in BASELINE_STYLE}
     )
 
+    # Every chart defaults to "All locations" (pooled). The dropdown swaps in
+    # per-location data client-side via Plotly.restyle rather than building a
+    # separate figure per location - so bar categories / line trace order (and
+    # their colors) are frozen to the pooled ranking and reused unchanged
+    # across every location (identity follows the entity, not a per-location
+    # re-sort - see the "recolor/reorder-on-filter" anti-pattern).
+    location_names = sorted(long_df["location_name"].unique())
+    target_slices = {t: long_df[long_df["target"] == t] for t in targets}
+    combo_slices = {key: df for key, df in long_df.groupby(["target", "location_name"])}
+
     theme_traces: dict[str, dict] = {}
+    location_data: dict[str, dict] = {}
     cards = []
     for target in targets:
         board_t = board[board["target"] == target]
@@ -413,10 +499,19 @@ def build_html_report(
 
         board_id = f"board-{target}"
         trend_id = f"trend-{target}"
-        board_fig, board_light, board_dark = _leaderboard_figure(board_t, raw_colors)
-        trend_fig, trend_light, trend_dark = _trend_figure(trend_t, raw_colors)
+        board_fig, board_light, board_dark, board_order = _leaderboard_figure(board_t, raw_colors)
+        trend_fig, trend_light, trend_dark, trend_order = _trend_figure(trend_t, raw_colors)
         theme_traces[board_id] = {"kind": "bar", "light": board_light, "dark": board_dark}
         theme_traces[trend_id] = {"kind": "line", "light": trend_light, "dark": trend_dark}
+
+        date_index = sorted({d.date().isoformat() for d in trend_t["forecast_date"]})
+        locations_payload = {}
+        for loc in ["__ALL__", *location_names]:
+            subset_t = target_slices[target] if loc == "__ALL__" else combo_slices.get((target, loc), target_slices[target].iloc[0:0])
+            mae, n = _board_series(subset_t, board_order, recent_days)
+            trend_series = _trend_series(subset_t, trend_order, date_index, rolling_window)
+            locations_payload[loc] = {"mae": mae, "n": n, "trend": trend_series}
+        location_data[target] = {"locations": locations_payload}
 
         board_div = board_fig.to_html(full_html=False, include_plotlyjs=False, div_id=board_id, config={"displayModeBar": False, "responsive": True})
         trend_div = trend_fig.to_html(full_html=False, include_plotlyjs=False, div_id=trend_id, config={"displayModeBar": False, "responsive": True})
@@ -424,7 +519,7 @@ def build_html_report(
         cards.append(
             f"""<section class="card">
   <h2>{escape(TARGET_LABELS.get(target, target))}</h2>
-  <p class="sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time</p>
+  <p class="sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; bar/line order is fixed to the all-locations ranking</p>
   <div class="panels">
     <div>{board_div}{_table_view(board_t)}</div>
     <div>{trend_div}</div>
@@ -436,6 +531,10 @@ def build_html_report(
     date_min = long_df["forecast_date"].min().date()
     date_max = long_df["forecast_date"].max().date()
     generated = datetime.now().isoformat(timespec="minutes")
+
+    location_options = "".join(
+        f'<option value="{escape(loc)}">{escape(loc)}</option>' for loc in location_names
+    )
 
     legend_key_entries = [
         *HERO_STYLE.values(),
@@ -463,18 +562,25 @@ def build_html_report(
       <h1>{escape(title)}</h1>
       <p>Ensemble and ML predictions scored against observed weather, alongside every individual forecast source and two naive baselines.</p>
       <div class="chip-row">
-        <span class="chip">{n_locations} location(s) pooled</span>
+        <span class="chip" id="location-chip">{n_locations} location(s) pooled</span>
         <span class="chip">last {history_days}d &middot; {date_min} &rarr; {date_max}</span>
         <span class="chip">generated {generated}</span>
       </div>
     </div>
-    <button id="theme-toggle" class="theme-toggle" type="button">Dark mode</button>
+    <div class="controls">
+      <select id="location-select" class="location-select">
+        <option value="__ALL__">All locations (pooled)</option>
+        {location_options}
+      </select>
+      <button id="theme-toggle" class="theme-toggle" type="button">Dark mode</button>
+    </div>
   </header>
   <div class="legend-key">{legend_key}</div>
   {''.join(cards)}
-  <footer>Lower is better for every metric shown, including did_rain (mean absolute error against the 0/1 outcome).</footer>
+  <footer>Lower is better for every metric shown, including did_rain (mean absolute error against the 0/1 outcome). Bar/line order stays fixed to the all-locations ranking when you switch locations, so series don't jump around.</footer>
 </div>
 {_theme_script(theme_traces)}
+{_location_script(location_data)}
 </body>
 </html>"""
 
