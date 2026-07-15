@@ -79,6 +79,7 @@ OPTIONAL_LIVE_PROVIDERS = [
     "openweathermap",
     "weatherbit",
     "accuweather",
+    "bom",
 ]
 
 
@@ -160,4 +161,4 @@ def get_default_location() -> Location:
 
 
 def get_rolling_window_days() -> int:
-    return int(os.getenv("ROLLING_WINDOW_DAYS", "14"))
+    return int(os.getenv("ROLLING_WINDOW_DAYS", "30"))

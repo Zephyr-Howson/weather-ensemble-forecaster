@@ -6,6 +6,7 @@ from weather_ensemble.config import Location, OPEN_METEO_MODELS
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.sources import (
     accuweather,
+    bom,
     open_meteo,
     openweathermap,
     visual_crossing,
@@ -32,6 +33,7 @@ OPTIONAL_FORECAST_SOURCES: dict[str, ForecastFetcher] = {
     "openweathermap": openweathermap.fetch_forecast,
     "weatherbit": weatherbit.fetch_forecast,
     "accuweather": accuweather.fetch_forecast,
+    "bom": bom.fetch_forecast,
 }
 
 FORECAST_SOURCES: dict[str, ForecastFetcher] = {

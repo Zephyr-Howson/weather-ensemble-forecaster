@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 
 from weather_ensemble.config import (
@@ -37,6 +38,17 @@ def _print_json(payload: object) -> None:
     print(json.dumps(payload, indent=2, default=str))
 
 
+def _location_model_dir(base: Path, location: Location) -> Path:
+    """Give each location its own model subdirectory.
+
+    Trained models are one-per-location (fit on that location's own history), so
+    sharing a single directory across --all-locations would let each location's
+    training overwrite the previous one's .pkl files.
+    """
+    slug = re.sub(r"[^a-z0-9]+", "_", location.name.lower()).strip("_") or "location"
+    return base / slug
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Weather ensemble forecaster")
     parser.add_argument("--lat", type=float, help="Latitude")
@@ -60,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Build wide ML feature table and save to parquet/csv",
     )
     parser.add_argument("--train", action="store_true", help="Train Phase 3 ML models")
+    parser.add_argument(
+        "--train-window",
+        type=int,
+        default=90,
+        help="Days of history for ML model training (default 90; separate from the blend's --window)",
+    )
     parser.add_argument("--predict-ml", action="store_true", help="Predict using trained ML models")
     parser.add_argument(
         "--model-dir",
@@ -97,13 +115,16 @@ def _write_dataframe(df, path: Path) -> Path:
 
 
 def _run_for_location(args: argparse.Namespace, location: Location) -> None:
+    model_dir = _location_model_dir(args.model_dir, location)
+
     if args.deploy_phases:
         result = deploy_all_phases(
             db_path=args.db,
             location=location,
             days_back=args.deploy_phases,
             processed_path=Path("data/processed/features.parquet"),
-            model_dir=args.model_dir,
+            model_dir=model_dir,
+            train_window_days=args.train_window,
         )
         _print_json(result)
         return
@@ -138,11 +159,11 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> None:
         print(f"Exported wide ML feature table to {output} ({len(df)} rows, {len(df.columns)} columns)")
 
     if args.train:
-        result = train_models(args.db, location, args.model_dir)
+        result = train_models(args.db, location, model_dir, window_days=args.train_window)
         _print_json(result)
 
     if args.predict_ml:
-        result = predict_latest_ml(args.db, location, args.model_dir)
+        result = predict_latest_ml(args.db, location, model_dir)
         _print_json(result)
 
 

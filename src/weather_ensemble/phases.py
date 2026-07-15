@@ -14,6 +14,7 @@ def deploy_all_phases(
     days_back: int,
     processed_path: Path,
     model_dir: Path,
+    train_window_days: int | None = None,
 ) -> dict[str, Any]:
     """Run the full local Phase 1-3 pipeline.
 
@@ -36,7 +37,13 @@ def deploy_all_phases(
             processed_path = processed_path.with_suffix(".csv")
             feature_df.to_csv(processed_path, index=False)
 
-    training = train_models(db_path, location, output_dir=model_dir, min_rows=min(30, max(10, days_back // 2)))
+    training = train_models(
+        db_path,
+        location,
+        output_dir=model_dir,
+        min_rows=min(30, max(10, days_back // 2)),
+        window_days=train_window_days,
+    )
     prediction = predict_latest_ml(db_path, location, model_dir=model_dir)
 
     return {

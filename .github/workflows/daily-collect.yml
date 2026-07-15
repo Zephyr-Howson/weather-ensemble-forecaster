@@ -37,7 +37,7 @@ jobs:
         run: |
           weather-ensemble \
             --all-locations \
-            --all --window 14 --train --predict-ml
+            --all --window 30 --train --train-window 90 --predict-ml
 
       - name: Commit updated database
         run: |

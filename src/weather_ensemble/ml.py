@@ -84,14 +84,21 @@ def _build_wide_feature_table(long_df: pd.DataFrame, include_targets: bool) -> p
     return wide.sort_values("forecast_date")
 
 
-def build_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
+def build_feature_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:
     """Build one wide training row per forecast date.
 
     Includes source-specific forecast columns plus ensemble statistics across
     sources: mean, median, std, min, max and range. These disagreement/spread
     features are often as important as the raw provider values.
+
+    window_days bounds how far back training history goes. Without it, every
+    row ever collected is used, which lets newly-added sources sit mostly-null
+    for a long time (diluted by history from before they existed) and keeps
+    training on old regimes (retired sources, since-updated provider models)
+    forever. A bounded window trades some of that history for training data
+    that's more representative of the sources actually live today.
     """
-    long_df = load_modelling_table(db_path, location)
+    long_df = load_modelling_table(db_path, location, window_days=window_days)
     return _build_wide_feature_table(long_df, include_targets=True)
 
 
@@ -143,9 +150,16 @@ def _make_model(target_name: str) -> tuple[str, Pipeline]:
     )
 
 
-def train_models(db_path: Path, location: Location, output_dir: Path, min_rows: int = 30, test_size: float = 0.25) -> dict[str, Any]:
+def train_models(
+    db_path: Path,
+    location: Location,
+    output_dir: Path,
+    min_rows: int = 30,
+    test_size: float = 0.25,
+    window_days: int | None = None,
+) -> dict[str, Any]:
     output_dir.mkdir(parents=True, exist_ok=True)
-    df = build_feature_table(db_path, location)
+    df = build_feature_table(db_path, location, window_days=window_days)
     if df.empty:
         return {"error": "No modelling rows available. Run backfill first."}
 

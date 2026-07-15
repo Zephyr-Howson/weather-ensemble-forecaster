@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from weather_ensemble.config import Location
-from weather_ensemble.sources import accuweather, openweathermap, silo, visual_crossing, weatherapi, weatherbit
+from weather_ensemble.sources import accuweather, bom, openweathermap, silo, visual_crossing, weatherapi, weatherbit
 
 
 class _FakeResponse:
@@ -237,3 +237,38 @@ def test_silo_parses_variable_codes(monkeypatch):
     assert record.min_temp == 10.0
     assert record.precipitation_sum == 0
     assert record.did_rain == 0
+
+
+def test_bom_maps_daily_forecast_and_preserves_zero_values(monkeypatch):
+    def fake_get(url, params=None, timeout=None):
+        if url.endswith("/locations"):
+            return _FakeResponse({"data": [{"geohash": "r1r0fsn", "name": "Melbourne"}]})
+        return _FakeResponse(
+            {
+                "data": [
+                    {
+                        "date": "2026-07-14T14:00:00Z",
+                        "temp_max": 15,
+                        "temp_min": 7,
+                        "rain": {"chance": 0, "amount": {"min": 0, "max": 0}},
+                        "uv": {"max_index": 0},
+                    },
+                    {
+                        "date": "2026-07-15T14:00:00Z",
+                        "temp_max": 15,
+                        "temp_min": 10,
+                        "rain": {"chance": 0, "amount": {"min": 0, "max": 0}},
+                        "uv": {"max_index": 0},
+                    },
+                ]
+            }
+        )
+
+    monkeypatch.setattr(bom.requests, "get", fake_get)
+
+    record = bom.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9, timezone="Australia/Melbourne"))
+
+    assert record.forecast_date.isoformat() == "2026-07-16"
+    assert record.rain_probability == 0
+    assert record.precipitation_sum == 0
+    assert record.uv_index == 0
