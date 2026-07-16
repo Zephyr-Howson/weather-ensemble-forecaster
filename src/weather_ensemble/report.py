@@ -24,7 +24,7 @@ TARGET_LABELS = {
     "max_temp": "Max temperature",
     "min_temp": "Min temperature",
     "precipitation_sum": "Precipitation",
-    "did_rain": "Did it rain (0/1 error)",
+    "did_rain": "Rain",
     "uv_index": "UV index",
     "wind_speed": "Wind speed",
     "wind_gusts": "Wind gusts",
@@ -129,7 +129,7 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
   <h3 data-day-label="{day_idx}">{escape(day["date"])}</h3>
   <table>
     <colgroup><col class="col-metric"><col class="col-num"><col class="col-num"><col class="col-num"></colgroup>
-    <thead><tr><th>Metric</th><th class="num">Ensemble</th><th class="num">ML</th><th class="num">Actual</th></tr></thead>
+    <thead><tr><th>Metric</th><th class="num">Weighted</th><th class="num">ML</th><th class="num">Actual</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </div>"""
@@ -187,7 +187,7 @@ function updateRecentForecast(loc) {{
 # winning or losing - see the "recolor-on-filter" anti-pattern.
 HERO_STYLE = {
     MODEL_ENSEMBLE: {
-        "legend": "Ensemble (weighted blend)",
+        "legend": "Weighted",
         "light": "#2a78d6",
         "dark": "#3987e5",
         "dash": "solid",
