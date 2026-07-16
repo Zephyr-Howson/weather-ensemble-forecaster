@@ -29,6 +29,18 @@ DATE_FEATURES = ["month", "day_of_year", "day_of_week"]
 # so its features are drawn from precipitation_sum's columns instead.
 FEATURE_TARGET_OVERRIDE = {"did_rain": "precipitation_sum"}
 
+# Ridge has no non-negativity constraint, so it can (and does) predict a
+# slightly negative value for a quantity that physically can't go below zero -
+# most visibly precipitation on a dry day. Clip these at 0 wherever a
+# regression prediction is produced or evaluated, so a model's reported MAE
+# and its actually-served prediction agree, and neither is inflated by an
+# impossible negative value.
+NON_NEGATIVE_TARGETS = {"precipitation_sum", "wind_speed", "wind_gusts", "uv_index"}
+
+
+def clip_prediction(target_name: str, value: float) -> float:
+    return max(0.0, value) if target_name in NON_NEGATIVE_TARGETS else value
+
 
 @dataclass(frozen=True)
 class TrainedModelBundle:
@@ -206,7 +218,7 @@ def train_models(
             except Exception:
                 pass
         else:
-            preds = model.predict(X_test)
+            preds = [clip_prediction(target_name, p) for p in model.predict(X_test)]
             metrics = {
                 "mae": float(mean_absolute_error(y_test, preds)),
                 "rmse": float(mean_squared_error(y_test, preds) ** 0.5),
@@ -257,7 +269,7 @@ def predict_latest_ml(db_path: Path, location: Location, model_dir: Path) -> dic
             if hasattr(bundle.model, "predict_proba"):
                 predictions[f"{target}_probability"] = round(float(bundle.model.predict_proba(X)[0][1]), 3)
         else:
-            predictions[target] = round(float(bundle.model.predict(X)[0]), 2)
+            predictions[target] = round(clip_prediction(target, float(bundle.model.predict(X)[0])), 2)
         metadata[target] = {"model_type": bundle.model_type, **bundle.metrics}
 
     if not predictions:

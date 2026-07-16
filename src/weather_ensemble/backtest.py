@@ -17,6 +17,7 @@ from weather_ensemble.ml import (
     TARGET_MAP,
     _build_wide_feature_table,
     _make_model,
+    clip_prediction,
     features_for_target,
 )
 from weather_ensemble.service import blend_weighted, compute_mae_scores, load_modelling_table
@@ -127,7 +128,7 @@ def _backtest_ml(
             if hasattr(model, "predict_proba"):
                 predictions[f"{target_name}_probability"] = round(float(model.predict_proba(X_pred)[0][1]), 3)
         else:
-            predictions[target_name] = round(float(model.predict(X_pred)[0]), 2)
+            predictions[target_name] = round(clip_prediction(target_name, float(model.predict(X_pred)[0])), 2)
         metadata[target_name] = {"model_type": model_type, "train_rows": int(len(data))}
 
     if not predictions:

@@ -10,7 +10,7 @@ from sklearn.pipeline import Pipeline
 
 from weather_ensemble.config import Location
 from weather_ensemble.db import connect, insert_forecasts
-from weather_ensemble.ml import TrainedModelBundle, build_prediction_feature_table, predict_latest_ml
+from weather_ensemble.ml import TrainedModelBundle, build_prediction_feature_table, clip_prediction, predict_latest_ml
 from weather_ensemble.models import ForecastRecord
 
 
@@ -103,3 +103,63 @@ def test_predict_latest_ml_uses_live_forecast_rows(tmp_path):
 
     assert result["forecast_date"] == tomorrow.isoformat()
     assert result["predictions"]["max_temp"] == 11.0
+
+
+def test_clip_prediction_floors_non_negative_targets_at_zero():
+    assert clip_prediction("precipitation_sum", -0.6) == 0.0
+    assert clip_prediction("wind_speed", -1.0) == 0.0
+    assert clip_prediction("wind_gusts", -1.0) == 0.0
+    assert clip_prediction("uv_index", -0.1) == 0.0
+    assert clip_prediction("precipitation_sum", 2.3) == 2.3
+
+
+def test_clip_prediction_leaves_temperature_targets_unclipped():
+    assert clip_prediction("max_temp", -4.0) == -4.0
+    assert clip_prediction("min_temp", -4.0) == -4.0
+
+
+def test_predict_latest_ml_clips_negative_precipitation_to_zero(tmp_path):
+    db_path = tmp_path / "weather.db"
+    model_dir = tmp_path / "models"
+    model_dir.mkdir()
+    location = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
+    tomorrow = date.today() + timedelta(days=1)
+
+    with connect(db_path) as conn:
+        insert_forecasts(
+            conn,
+            [
+                _forecast_record("open_meteo_best_match", tomorrow, datetime.now().replace(microsecond=0), 25.0),
+                _forecast_record("open_meteo_gfs_global", tomorrow, datetime.now().replace(microsecond=0), 27.0),
+            ],
+        )
+
+    feature_df = build_prediction_feature_table(db_path, location)
+    feature_columns = [column for column in feature_df.columns if pd.api.types.is_numeric_dtype(feature_df[column])]
+    training_frame = pd.concat([feature_df[feature_columns], feature_df[feature_columns]], ignore_index=True)
+    # A Ridge-like regressor with no non-negativity constraint can legitimately
+    # predict a small negative value for a dry day - simulate that directly.
+    target = pd.Series([-0.4, -0.4])
+
+    model = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("model", DummyRegressor(strategy="mean")),
+        ]
+    )
+    model.fit(training_frame, target)
+
+    bundle = TrainedModelBundle(
+        target="precipitation_sum",
+        features=feature_columns,
+        model=model,
+        metrics={"mae": 1.0},
+        trained_at="2026-06-18T00:00:00",
+        model_type="regression",
+    )
+    with (model_dir / "precipitation_sum.pkl").open("wb") as handle:
+        pickle.dump(bundle, handle)
+
+    result = predict_latest_ml(db_path, location, model_dir)
+
+    assert result["predictions"]["precipitation_sum"] == 0.0
