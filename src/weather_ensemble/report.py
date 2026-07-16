@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from html import escape
 from pathlib import Path
 
@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from weather_ensemble import db
-from weather_ensemble.config import AUSTRALIAN_LOCATIONS, TARGETS, Location, local_today
+from weather_ensemble.config import AUSTRALIAN_LOCATIONS, TARGETS, Location
 from weather_ensemble.scoring import (
     BASELINE_CLIMATOLOGY,
     BASELINE_PERSISTENCE,
@@ -31,6 +31,9 @@ TARGET_LABELS = {
 }
 
 RECENT_DAYS_COUNT = 5
+# UV index is excluded here - ML never trains a predictor for it (no source
+# reliably supplies it as a feature), so it would be blank on every row.
+RECENT_TARGETS = [t for t in TARGETS if t != "uv_index"]
 RECENT_UNITS = {
     "max_temp": "°C",
     "min_temp": "°C",
@@ -49,20 +52,32 @@ def _format_recent_value(target: str, value) -> str:
 
 
 def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str, list[dict]]:
-    """Per location, the last RECENT_DAYS_COUNT days (today first): whatever
-    ensemble/ML prediction and actual exist for that date. A prediction that
-    hasn't landed yet (today has no actual - it hasn't happened; a forecast
-    that failed to generate) is left as None per-target rather than dropping
-    the row or the whole day, so the table renders a blank cell instead.
+    """Per location, the most recent RECENT_DAYS_COUNT dates that have any
+    ensemble/ML prediction or actual at all - not a fixed calendar-day anchor
+    (today, yesterday, ...), which could land on a date with nothing recorded
+    yet. Newest first. A specific field missing for one of those dates (a
+    prediction that failed to generate, an actual that hasn't arrived) is left
+    as None per-target rather than dropping the row, so the table renders a
+    blank cell instead.
     """
     data: dict[str, list[dict]] = {}
     with db.connect(db_path) as conn:
         for location in locations:
-            today = local_today(location)
+            date_rows = conn.execute(
+                """
+                SELECT forecast_date AS d FROM ensemble_predictions WHERE location_name = ?
+                UNION
+                SELECT forecast_date AS d FROM ml_predictions WHERE location_name = ?
+                UNION
+                SELECT actual_date AS d FROM actuals WHERE location_name = ?
+                ORDER BY d DESC LIMIT ?
+                """,
+                (location.name, location.name, location.name, RECENT_DAYS_COUNT),
+            ).fetchall()
+
             days = []
-            for i in range(RECENT_DAYS_COUNT):
-                d = today - timedelta(days=i)
-                d_iso = d.isoformat()
+            for row in date_rows:
+                d_iso = row["d"]
                 ens = conn.execute(
                     "SELECT * FROM ensemble_predictions WHERE location_name = ? AND forecast_date = ? "
                     "ORDER BY generated_at DESC LIMIT 1",
@@ -80,51 +95,49 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
                 ).fetchone()
                 days.append(
                     {
-                        "label": {0: "Today", 1: "Yesterday"}.get(i, d_iso),
                         "date": d_iso,
-                        "ensemble": {t: (ens[t] if ens is not None else None) for t in TARGETS},
-                        "ml": {t: (ml[t] if ml is not None else None) for t in TARGETS},
-                        "actual": {t: (actual[t] if actual is not None else None) for t in TARGETS},
+                        "ensemble": {t: (ens[t] if ens is not None else None) for t in RECENT_TARGETS},
+                        "ml": {t: (ml[t] if ml is not None else None) for t in RECENT_TARGETS},
+                        "actual": {t: (actual[t] if actual is not None else None) for t in RECENT_TARGETS},
                     }
                 )
             data[location.name] = days
     return data
 
 
-def _recent_forecast_html(recent_data: dict[str, list[dict]], default_location: str, location_names: list[str]) -> str:
-    options = "".join(
-        f'<option value="{escape(loc)}"{" selected" if loc == default_location else ""}>{escape(loc)}</option>'
-        for loc in location_names
-    )
-    default_days = recent_data.get(default_location, [])
+def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: str) -> str:
+    """Rendered once for a sample location purely as the pre-JS document
+    structure - the section starts hidden (style="display:none") since the
+    default location selection is "All locations" (pooled), and JS shows it
+    with the real selected location's data as soon as it resolves the current
+    dropdown value (which may be a remembered real location, not "__ALL__").
+    """
+    sample_days = recent_data.get(sample_location, [])
 
     day_cards = []
-    for day_idx, day in enumerate(default_days):
+    for day_idx, day in enumerate(sample_days):
         rows = "".join(
             f"<tr><td>{escape(TARGET_LABELS.get(t, t))}</td>"
             f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ensemble'>{escape(_format_recent_value(t, day['ensemble'].get(t)))}</td>"
             f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ml'>{escape(_format_recent_value(t, day['ml'].get(t)))}</td>"
             f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='actual'>{escape(_format_recent_value(t, day['actual'].get(t)))}</td>"
             "</tr>"
-            for t in TARGETS
+            for t in RECENT_TARGETS
         )
-        header_text = day["date"] if day["label"] == day["date"] else f'{day["label"]} · {day["date"]}'
         day_cards.append(
             f"""<div class="recent-day-card">
-  <h3 data-day-label="{day_idx}">{escape(header_text)}</h3>
+  <h3 data-day-label="{day_idx}">{escape(day["date"])}</h3>
   <table>
+    <colgroup><col class="col-metric"><col class="col-num"><col class="col-num"><col class="col-num"></colgroup>
     <thead><tr><th>Metric</th><th class="num">Ensemble</th><th class="num">ML</th><th class="num">Actual</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </div>"""
         )
 
-    return f"""<section class="recent-forecast-section">
-  <div class="recent-forecast-header">
-    <h2>Recent forecast vs actual</h2>
-    <select id="recent-location-select" class="location-select">{options}</select>
-  </div>
-  <div class="recent-days">{"".join(day_cards)}</div>
+    return f"""<section class="recent-forecast-section" id="recent-forecast-section" style="display:none">
+  <h2>Recent forecasts</h2>
+  <div class="recent-days" id="recent-days">{"".join(day_cards)}</div>
 </section>"""
 
 
@@ -139,29 +152,25 @@ window.__formatRecentValue = function (target, value) {{
   var unit = window.__RECENT_UNITS[target] || "";
   return Number(value).toFixed(1) + unit;
 }};
-function renderRecentForecast() {{
-  var select = document.getElementById("recent-location-select");
-  if (!select) return;
-  var days = window.__RECENT_DATA[select.value] || [];
+function updateRecentForecast(loc) {{
+  var section = document.getElementById("recent-forecast-section");
+  if (!section) return;
+  var days = loc ? window.__RECENT_DATA[loc] : null;
+  if (!loc || loc === "__ALL__" || !days) {{
+    section.style.display = "none";
+    return;
+  }}
+  section.style.display = "";
   days.forEach(function (day, i) {{
     var label = document.querySelector('[data-day-label="' + i + '"]');
-    if (label) label.textContent = day.label === day.date ? day.date : (day.label + " · " + day.date);
+    if (label) label.textContent = day.date;
     document.querySelectorAll('[data-day="' + i + '"]').forEach(function (cell) {{
       var target = cell.dataset.target, field = cell.dataset.field;
       var value = day[field] ? day[field][target] : null;
       cell.textContent = window.__formatRecentValue(target, value);
     }});
   }});
-  localStorage.setItem("weather-report-recent-location", select.value);
 }}
-document.addEventListener("DOMContentLoaded", function () {{
-  var select = document.getElementById("recent-location-select");
-  if (!select) return;
-  var stored = localStorage.getItem("weather-report-recent-location");
-  if (stored && window.__RECENT_DATA[stored]) select.value = stored;
-  renderRecentForecast();
-  select.addEventListener("change", renderRecentForecast);
-}});
 </script>
 """
 
@@ -487,8 +496,7 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 .legend-key span.swatch { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
 
 .recent-forecast-section { margin-bottom: 28px; }
-.recent-forecast-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
-.recent-forecast-header h2 { font-size: 16px; font-weight: 650; margin: 0; }
+.recent-forecast-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
 .recent-days { display: flex; flex-direction: column; gap: 10px; }
 .recent-day-card {
   background: var(--surface-1);
@@ -497,10 +505,18 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   padding: 14px 18px;
 }
 .recent-day-card h3 { font-size: 13.5px; font-weight: 600; margin: 0 0 8px; color: var(--text-secondary); }
-.recent-day-card table { width: 100%; border-collapse: collapse; font-size: 13px; }
+/* table-layout: fixed + a shared colgroup keeps the Metric/Ensemble/ML/Actual
+   columns at identical widths across every stacked day-card, regardless of
+   how long any one card's values happen to be - without it each table sizes
+   its columns independently and they drift out of alignment card to card. */
+.recent-day-card table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+.recent-day-card col.col-metric { width: 40%; }
+.recent-day-card col.col-num { width: 20%; }
 .recent-day-card th, .recent-day-card td { padding: 5px 10px; border-bottom: 1px solid var(--border); text-align: right; }
 .recent-day-card th:first-child, .recent-day-card td:first-child { text-align: left; color: var(--text-secondary); }
 .recent-day-card td.num, .recent-day-card th.num { font-variant-numeric: tabular-nums; }
+
+.historical-accuracy-heading { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
 
 .card {
   background: var(--surface-1);
@@ -643,6 +659,7 @@ function renderCharts() {{
   if (chip) chip.textContent = loc === "__ALL__" ? "all locations pooled" : "viewing " + loc;
   localStorage.setItem("weather-report-location", loc);
   localStorage.setItem("weather-report-show-baselines", showBaselines ? "1" : "0");
+  if (typeof updateRecentForecast === "function") updateRecentForecast(loc);
 }}
 document.addEventListener("DOMContentLoaded", function () {{
   var select = document.getElementById("location-select");
@@ -696,9 +713,12 @@ def build_html_report(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     recent_data = _recent_forecast_data(db_path, AUSTRALIAN_LOCATIONS)
-    recent_location_names = [loc.name for loc in AUSTRALIAN_LOCATIONS]
-    default_recent_location = "Melbourne" if "Melbourne" in recent_data else next(iter(recent_data), "")
-    recent_forecast_html = _recent_forecast_html(recent_data, default_recent_location, recent_location_names)
+    # Purely the pre-JS document structure - the section starts hidden and JS
+    # fills it with whichever location the shared dropdown actually resolves
+    # to (see _recent_forecast_html's docstring), so which location's data
+    # gets baked into the static markup here doesn't matter.
+    sample_recent_location = next(iter(recent_data), "")
+    recent_forecast_html = _recent_forecast_html(recent_data, sample_recent_location)
     recent_forecast_script = _recent_forecast_script(recent_data)
 
     if not long_df.empty:
@@ -853,6 +873,7 @@ def build_html_report(
     </div>
   </header>
   {recent_forecast_html}
+  <h2 class="historical-accuracy-heading">Historical accuracy</h2>
   <div class="legend-key">{legend_key}</div>
   {''.join(cards)}
   <footer>Lower is better for every metric shown, including did_rain (mean absolute error against the 0/1 outcome). Bar/line order stays fixed to the all-locations ranking when you switch locations, so series don't jump around.</footer>
