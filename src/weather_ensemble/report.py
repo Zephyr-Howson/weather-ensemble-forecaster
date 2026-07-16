@@ -293,6 +293,16 @@ def _display_name(model: str) -> str:
     return model.replace("_", " ")
 
 
+def _bar_display_name(model: str) -> str:
+    """Same as _display_name, except the leaderboard bars (and their table-view
+    twin) spell out "Weighted model" rather than just "Weighted" - the trend
+    chart's legend/hover and the recent-forecasts table keep the shorter form.
+    """
+    if model == MODEL_ENSEMBLE:
+        return "Weighted model"
+    return _display_name(model)
+
+
 def _axis_layout(fig: go.Figure) -> None:
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
@@ -320,7 +330,7 @@ def _leaderboard_figure(
     fig = go.Figure(
         go.Bar(
             x=board_t["mae"],
-            y=[_display_name(m) for m in model_order],
+            y=[_bar_display_name(m) for m in model_order],
             orientation="h",
             marker_color=colors_light,
             text=[f"{v:.2f}" for v in board_t["mae"]],
@@ -418,7 +428,7 @@ def _table_view(board_t: pd.DataFrame) -> str:
     rows = []
     for _, r in board_t.sort_values("mae").iterrows():
         rows.append(
-            f"<tr><td>{escape(_display_name(r['model']))}</td>"
+            f"<tr><td>{escape(_bar_display_name(r['model']))}</td>"
             f"<td class='num'>{r['mae']:.3f}</td><td class='num'>{int(r['n'])}</td></tr>"
         )
     return (
@@ -799,7 +809,7 @@ def build_html_report(
             # dropdown hit with the trend chart. board_categories is the full
             # label list so JS can filter it by the same mask it applies to the
             # values, instead of leaving a label with no bar next to it.
-            "board_categories": [_display_name(m) for m in board_order],
+            "board_categories": [_bar_display_name(m) for m in board_order],
             "baseline_mask_board": [m in BASELINE_STYLE for m in board_order],
             # The trend chart's baselines are separate traces, so hiding them
             # is just a per-trace visibility toggle by index.
