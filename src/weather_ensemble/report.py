@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 
 import pandas as pd
 import plotly.graph_objects as go
 
-from weather_ensemble.config import TARGETS
+from weather_ensemble import db
+from weather_ensemble.config import AUSTRALIAN_LOCATIONS, TARGETS, Location, local_today
 from weather_ensemble.scoring import (
     BASELINE_CLIMATOLOGY,
     BASELINE_PERSISTENCE,
@@ -28,6 +29,141 @@ TARGET_LABELS = {
     "wind_speed": "Wind speed",
     "wind_gusts": "Wind gusts",
 }
+
+RECENT_DAYS_COUNT = 5
+RECENT_UNITS = {
+    "max_temp": "°C",
+    "min_temp": "°C",
+    "precipitation_sum": "mm",
+    "wind_speed": "km/h",
+    "wind_gusts": "km/h",
+}
+
+
+def _format_recent_value(target: str, value) -> str:
+    if value is None:
+        return "—"
+    if target == "did_rain":
+        return "Yes" if value else "No"
+    return f"{float(value):.1f}{RECENT_UNITS.get(target, '')}"
+
+
+def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str, list[dict]]:
+    """Per location, the last RECENT_DAYS_COUNT days (today first): whatever
+    ensemble/ML prediction and actual exist for that date. A prediction that
+    hasn't landed yet (today has no actual - it hasn't happened; a forecast
+    that failed to generate) is left as None per-target rather than dropping
+    the row or the whole day, so the table renders a blank cell instead.
+    """
+    data: dict[str, list[dict]] = {}
+    with db.connect(db_path) as conn:
+        for location in locations:
+            today = local_today(location)
+            days = []
+            for i in range(RECENT_DAYS_COUNT):
+                d = today - timedelta(days=i)
+                d_iso = d.isoformat()
+                ens = conn.execute(
+                    "SELECT * FROM ensemble_predictions WHERE location_name = ? AND forecast_date = ? "
+                    "ORDER BY generated_at DESC LIMIT 1",
+                    (location.name, d_iso),
+                ).fetchone()
+                ml = conn.execute(
+                    "SELECT * FROM ml_predictions WHERE location_name = ? AND forecast_date = ? "
+                    "ORDER BY generated_at DESC LIMIT 1",
+                    (location.name, d_iso),
+                ).fetchone()
+                actual = conn.execute(
+                    "SELECT * FROM actuals WHERE location_name = ? AND actual_date = ? "
+                    "ORDER BY collected_at DESC LIMIT 1",
+                    (location.name, d_iso),
+                ).fetchone()
+                days.append(
+                    {
+                        "label": {0: "Today", 1: "Yesterday"}.get(i, d_iso),
+                        "date": d_iso,
+                        "ensemble": {t: (ens[t] if ens is not None else None) for t in TARGETS},
+                        "ml": {t: (ml[t] if ml is not None else None) for t in TARGETS},
+                        "actual": {t: (actual[t] if actual is not None else None) for t in TARGETS},
+                    }
+                )
+            data[location.name] = days
+    return data
+
+
+def _recent_forecast_html(recent_data: dict[str, list[dict]], default_location: str, location_names: list[str]) -> str:
+    options = "".join(
+        f'<option value="{escape(loc)}"{" selected" if loc == default_location else ""}>{escape(loc)}</option>'
+        for loc in location_names
+    )
+    default_days = recent_data.get(default_location, [])
+
+    day_cards = []
+    for day_idx, day in enumerate(default_days):
+        rows = "".join(
+            f"<tr><td>{escape(TARGET_LABELS.get(t, t))}</td>"
+            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ensemble'>{escape(_format_recent_value(t, day['ensemble'].get(t)))}</td>"
+            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ml'>{escape(_format_recent_value(t, day['ml'].get(t)))}</td>"
+            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='actual'>{escape(_format_recent_value(t, day['actual'].get(t)))}</td>"
+            "</tr>"
+            for t in TARGETS
+        )
+        header_text = day["date"] if day["label"] == day["date"] else f'{day["label"]} · {day["date"]}'
+        day_cards.append(
+            f"""<div class="recent-day-card">
+  <h3 data-day-label="{day_idx}">{escape(header_text)}</h3>
+  <table>
+    <thead><tr><th>Metric</th><th class="num">Ensemble</th><th class="num">ML</th><th class="num">Actual</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>"""
+        )
+
+    return f"""<section class="recent-forecast-section">
+  <div class="recent-forecast-header">
+    <h2>Recent forecast vs actual</h2>
+    <select id="recent-location-select" class="location-select">{options}</select>
+  </div>
+  <div class="recent-days">{"".join(day_cards)}</div>
+</section>"""
+
+
+def _recent_forecast_script(recent_data: dict) -> str:
+    return f"""
+<script>
+window.__RECENT_DATA = {json.dumps(recent_data)};
+window.__RECENT_UNITS = {json.dumps(RECENT_UNITS)};
+window.__formatRecentValue = function (target, value) {{
+  if (value === null || value === undefined) return "—";
+  if (target === "did_rain") return value ? "Yes" : "No";
+  var unit = window.__RECENT_UNITS[target] || "";
+  return Number(value).toFixed(1) + unit;
+}};
+function renderRecentForecast() {{
+  var select = document.getElementById("recent-location-select");
+  if (!select) return;
+  var days = window.__RECENT_DATA[select.value] || [];
+  days.forEach(function (day, i) {{
+    var label = document.querySelector('[data-day-label="' + i + '"]');
+    if (label) label.textContent = day.label === day.date ? day.date : (day.label + " · " + day.date);
+    document.querySelectorAll('[data-day="' + i + '"]').forEach(function (cell) {{
+      var target = cell.dataset.target, field = cell.dataset.field;
+      var value = day[field] ? day[field][target] : null;
+      cell.textContent = window.__formatRecentValue(target, value);
+    }});
+  }});
+  localStorage.setItem("weather-report-recent-location", select.value);
+}}
+document.addEventListener("DOMContentLoaded", function () {{
+  var select = document.getElementById("recent-location-select");
+  if (!select) return;
+  var stored = localStorage.getItem("weather-report-recent-location");
+  if (stored && window.__RECENT_DATA[stored]) select.value = stored;
+  renderRecentForecast();
+  select.addEventListener("change", renderRecentForecast);
+}});
+</script>
+"""
 
 # Reference palette (see dataviz skill, references/palette.md). Ensemble/ML -
 # the two models this report is actually about - get the palette's blue/green
@@ -350,6 +486,22 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 .legend-key { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 22px; font-size: 12.5px; color: var(--text-secondary); }
 .legend-key span.swatch { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
 
+.recent-forecast-section { margin-bottom: 28px; }
+.recent-forecast-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.recent-forecast-header h2 { font-size: 16px; font-weight: 650; margin: 0; }
+.recent-days { display: flex; flex-direction: column; gap: 10px; }
+.recent-day-card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 18px;
+}
+.recent-day-card h3 { font-size: 13.5px; font-weight: 600; margin: 0 0 8px; color: var(--text-secondary); }
+.recent-day-card table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.recent-day-card th, .recent-day-card td { padding: 5px 10px; border-bottom: 1px solid var(--border); text-align: right; }
+.recent-day-card th:first-child, .recent-day-card td:first-child { text-align: left; color: var(--text-secondary); }
+.recent-day-card td.num, .recent-day-card th.num { font-variant-numeric: tabular-nums; }
+
 .card {
   background: var(--surface-1);
   border: 1px solid var(--border);
@@ -518,6 +670,7 @@ document.addEventListener("DOMContentLoaded", function () {{
 def build_html_report(
     long_df: pd.DataFrame,
     output_path: Path,
+    db_path: Path,
     rolling_window: int = 7,
     recent_days: int = 30,
     history_days: int = 90,
@@ -525,18 +678,28 @@ def build_html_report(
 ) -> Path:
     """Render a self-contained interactive HTML report.
 
-    Every chart is scoped to the last `history_days` (default ~3 months). One
-    card per target variable: a leaderboard (mean absolute error over the last
-    `recent_days`) and a rolling `rolling_window`-day MAE-over-time line chart,
-    plus a plain-HTML table twin of the leaderboard. The ensemble and ML model
-    are drawn in their own colors and painted on top; every raw provider
-    source gets its own shade along a fixed orange->red gradient (de-emphasized
-    via opacity/width) so they stay distinguishable without competing with the
-    two models this report is actually about, and the two baselines are grey,
-    dashed/dotted reference lines rather than competing series.
+    Leads with today's ensemble/ML forecast plus the last few days' predictions
+    alongside their actuals (queried directly from the DB via `db_path`, since
+    today's forecast has no actual yet and would never appear in the scored
+    `long_df`). Below that, every chart is scoped to the last `history_days`
+    (default ~3 months). One card per target variable: a leaderboard (mean
+    absolute error over the last `recent_days`) and a rolling `rolling_window`-
+    day MAE-over-time line chart, plus a plain-HTML table twin of the
+    leaderboard. The ensemble and ML model are drawn in their own colors and
+    painted on top; every raw provider source gets its own shade along a fixed
+    orange->red gradient (de-emphasized via opacity/width) so they stay
+    distinguishable without competing with the two models this report is
+    actually about, and the two baselines are grey, dashed/dotted reference
+    lines rather than competing series.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    recent_data = _recent_forecast_data(db_path, AUSTRALIAN_LOCATIONS)
+    recent_location_names = [loc.name for loc in AUSTRALIAN_LOCATIONS]
+    default_recent_location = "Melbourne" if "Melbourne" in recent_data else next(iter(recent_data), "")
+    recent_forecast_html = _recent_forecast_html(recent_data, default_recent_location, recent_location_names)
+    recent_forecast_script = _recent_forecast_script(recent_data)
 
     if not long_df.empty:
         cutoff = long_df["forecast_date"].max() - pd.Timedelta(days=history_days)
@@ -546,8 +709,11 @@ def build_html_report(
         html = f"""<!doctype html><html><head><meta charset="utf-8"><title>{escape(title)}</title>
 <style>{_PAGE_CSS}</style></head><body><div class="wrap">
 <header class="top"><div><h1>{escape(title)}</h1><p>No scored predictions yet.</p></div></header>
+{recent_forecast_html}
 <div class="empty">Run the pipeline for a few days to accumulate forecasts and actuals, then regenerate this report.</div>
-</div></body></html>"""
+</div>
+{recent_forecast_script}
+</body></html>"""
         output_path.write_text(html, encoding="utf-8")
         return output_path
 
@@ -686,12 +852,14 @@ def build_html_report(
       <button id="theme-toggle" class="theme-toggle" type="button">Dark mode</button>
     </div>
   </header>
+  {recent_forecast_html}
   <div class="legend-key">{legend_key}</div>
   {''.join(cards)}
   <footer>Lower is better for every metric shown, including did_rain (mean absolute error against the 0/1 outcome). Bar/line order stays fixed to the all-locations ranking when you switch locations, so series don't jump around.</footer>
 </div>
 {_theme_script(theme_traces)}
 {_controls_script(location_data)}
+{recent_forecast_script}
 </body>
 </html>"""
 

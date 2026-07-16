@@ -315,6 +315,7 @@ def main() -> None:
         output = build_html_report(
             long_df,
             args.accuracy_report,
+            args.db,
             rolling_window=args.report_window,
             recent_days=args.report_recent_days,
             history_days=args.report_history_days,

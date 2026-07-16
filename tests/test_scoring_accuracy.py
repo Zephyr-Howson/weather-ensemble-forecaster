@@ -156,12 +156,12 @@ def test_build_html_report_writes_file(tmp_path):
     _seed_db(db_path)
     long_df = build_predictions_long(db_path, [LOCATION])
 
-    output = build_html_report(long_df, tmp_path / "report.html")
+    output = build_html_report(long_df, tmp_path / "report.html", db_path)
 
     assert output.exists()
     assert output.read_text(encoding="utf-8").startswith("<html>") or "<div" in output.read_text(encoding="utf-8")
 
 
 def test_build_html_report_handles_empty_input(tmp_path):
-    output = build_html_report(pd.DataFrame(), tmp_path / "empty.html")
+    output = build_html_report(pd.DataFrame(), tmp_path / "empty.html", tmp_path / "empty.db")
     assert output.exists()
