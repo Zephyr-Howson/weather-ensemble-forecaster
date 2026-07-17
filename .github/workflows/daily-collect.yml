@@ -12,16 +12,11 @@ concurrency:
 
 permissions:
   contents: write
-  pages: write
-  id-token: write
 
 jobs:
   collect:
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
 
@@ -63,25 +58,6 @@ jobs:
           git pull --rebase
           git push
 
-      # Publishes the same report to a stable GitHub Pages URL so it can just
-      # be refreshed for the latest data, instead of needing a git pull + local
-      # file open. One-time manual setup required first: repo Settings > Pages
-      # > Build and deployment > Source = "GitHub Actions". Ordered after the
-      # data commit above and never fails the job, so a not-yet-enabled Pages
-      # site (or any Pages hiccup) can't block the actual data pipeline.
-      - name: Prepare Pages site
-        run: |
-          mkdir -p site
-          cp reports/accuracy_report.html site/index.html
-        continue-on-error: true
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@v5
-        with:
-          path: site
-        continue-on-error: true
-
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v5
-        continue-on-error: true
+      # GitHub Pages deployment lives in its own workflow (deploy-pages.yml) so
+      # it redeploys on *any* push that changes the report - including a manual
+      # fix pushed outside this nightly run - not just once a day here.

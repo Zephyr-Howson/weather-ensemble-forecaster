@@ -1,0 +1,63 @@
+name: Deploy accuracy report to Pages
+
+# Two triggers, because a single one can't cover both cases:
+#
+# - `push` fires for a commit pushed with real user credentials (e.g. a manual
+#   fix pushed outside the nightly run) - but GitHub deliberately does NOT fire
+#   `push` for a commit made with the default GITHUB_TOKEN, to prevent
+#   workflow-triggers-workflow loops. daily-collect.yml's automated commit uses
+#   exactly that default token, so `push` alone would never catch the nightly
+#   run.
+# - `workflow_run` fires whenever daily-collect.yml finishes, regardless of
+#   what token it pushed with - covering the nightly case `push` misses.
+#
+# Together, any change to the report - nightly or ad hoc - redeploys Pages
+# within a minute or two, instead of only catching up once a day.
+on:
+  push:
+    branches: [main]
+    paths:
+      - reports/accuracy_report.html
+  workflow_run:
+    workflows: ["Daily forecast collection"]
+    types: [completed]
+  workflow_dispatch:
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  pages: write
+  id-token: write
+
+jobs:
+  deploy:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_run doesn't automatically check out the triggering run's
+          # commit - pin explicitly to it so a still-in-flight daily-collect
+          # run can't ever have this job deploy an older report than what it
+          # just committed.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Prepare Pages site
+        run: |
+          mkdir -p site
+          cp reports/accuracy_report.html site/index.html
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
