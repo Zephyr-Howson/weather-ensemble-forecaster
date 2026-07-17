@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta
 
-import requests
-
 from weather_ensemble.config import Location, RAIN_THRESHOLD_MM, TIMEOUT_SECONDS, local_today
 from weather_ensemble.models import ActualRecord, ForecastRecord
+from weather_ensemble.retry import get_with_retry
 
 FORECAST_DAILY_FIELDS = [
     "temperature_2m_max",
@@ -75,8 +74,7 @@ def fetch_forecast(location: Location, model: str = "best_match") -> ForecastRec
         "forecast_days": 3,
         "models": model,
     }
-    response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
     payload = response.json()
     daily = payload["daily"]
     hourly = payload.get("hourly", {})
@@ -122,8 +120,7 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
         "hourly": ",".join(ACTUAL_HOURLY_FIELDS),
         "timezone": location.timezone,
     }
-    response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
     payload = response.json()
     daily = payload["daily"]
     hourly = payload.get("hourly", {})
@@ -182,8 +179,7 @@ def fetch_historical_forecasts(location: Location, days_back: int, model: str = 
             request_params["past_days"] = days_back
             request_params["forecast_days"] = 1
         try:
-            response = requests.get(url, params=request_params, timeout=TIMEOUT_SECONDS)
-            response.raise_for_status()
+            response = get_with_retry(url, params=request_params, timeout=TIMEOUT_SECONDS)
             payload = response.json()
             break
         except Exception as exc:  # pragma: no cover

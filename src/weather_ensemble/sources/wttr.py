@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-import requests
-
 from weather_ensemble.config import Location, TIMEOUT_SECONDS
 from weather_ensemble.models import ForecastRecord
+from weather_ensemble.retry import get_with_retry
 
 
 def _to_float(value: object) -> float | None:
@@ -30,8 +29,7 @@ def _mean_hourly(hourly: list[dict], key: str) -> float | None:
 def fetch_forecast(location: Location) -> ForecastRecord:
     """Fetch tomorrow's forecast from wttr.in."""
     url = f"https://wttr.in/{location.lat},{location.lon}"
-    response = requests.get(url, params={"format": "j1"}, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, params={"format": "j1"}, timeout=TIMEOUT_SECONDS)
     payload = response.json()
 
     try:

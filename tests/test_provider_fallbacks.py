@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from weather_ensemble import retry
 from weather_ensemble.config import Location
 from weather_ensemble.sources import accuweather, bom, openweathermap, silo, visual_crossing, weatherapi, weatherbit
 
@@ -18,7 +19,7 @@ class _FakeResponse:
 def test_weatherapi_preserves_zero_humidity(monkeypatch):
     monkeypatch.setattr(weatherapi.os, "getenv", lambda key: "test-key")
     monkeypatch.setattr(
-        weatherapi.requests,
+        retry.requests,
         "get",
         lambda *args, **kwargs: _FakeResponse(
             {
@@ -53,7 +54,7 @@ def test_weatherapi_preserves_zero_humidity(monkeypatch):
 def test_visual_crossing_preserves_zero_values(monkeypatch):
     monkeypatch.setattr(visual_crossing.os, "getenv", lambda key: "test-key")
     monkeypatch.setattr(
-        visual_crossing.requests,
+        retry.requests,
         "get",
         lambda *args, **kwargs: _FakeResponse(
             {
@@ -102,7 +103,7 @@ def test_openweathermap_aggregates_3hourly_into_daily(monkeypatch):
 
     monkeypatch.setattr(openweathermap.os, "getenv", lambda key: "test-key")
     monkeypatch.setattr(
-        openweathermap.requests,
+        retry.requests,
         "get",
         lambda *args, **kwargs: _FakeResponse(
             {
@@ -133,7 +134,7 @@ def test_openweathermap_aggregates_3hourly_into_daily(monkeypatch):
 def test_weatherbit_converts_wind_to_kmh_and_prefers_slp(monkeypatch):
     monkeypatch.setattr(weatherbit.os, "getenv", lambda key: "test-key")
     monkeypatch.setattr(
-        weatherbit.requests,
+        retry.requests,
         "get",
         lambda *args, **kwargs: _FakeResponse(
             {
@@ -196,7 +197,7 @@ def test_accuweather_two_step_lookup_preserves_zero_values(monkeypatch):
             }
         )
 
-    monkeypatch.setattr(accuweather.requests, "get", fake_get)
+    monkeypatch.setattr(retry.requests, "get", fake_get)
 
     record = accuweather.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9))
 
@@ -211,7 +212,7 @@ def test_accuweather_two_step_lookup_preserves_zero_values(monkeypatch):
 def test_silo_parses_variable_codes(monkeypatch):
     monkeypatch.setattr(silo.os, "getenv", lambda key: "test@example.com")
     monkeypatch.setattr(
-        silo.requests,
+        retry.requests,
         "get",
         lambda *args, **kwargs: _FakeResponse(
             {
@@ -264,7 +265,7 @@ def test_bom_maps_daily_forecast_and_preserves_zero_values(monkeypatch):
             }
         )
 
-    monkeypatch.setattr(bom.requests, "get", fake_get)
+    monkeypatch.setattr(retry.requests, "get", fake_get)
 
     record = bom.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9, timezone="Australia/Melbourne"))
 

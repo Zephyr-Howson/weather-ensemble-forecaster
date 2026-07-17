@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 from datetime import date, datetime
 
-import requests
-
 from weather_ensemble.config import Location, RAIN_THRESHOLD_MM, TIMEOUT_SECONDS
 from weather_ensemble.models import ActualRecord
+from weather_ensemble.retry import get_with_retry
 
 
 def _to_float(value: object) -> float | None:
@@ -54,8 +53,7 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
         "username": email,
         "password": "apirequest",
     }
-    response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
     payload = response.json()
 
     try:

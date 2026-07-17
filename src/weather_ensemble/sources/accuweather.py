@@ -3,10 +3,9 @@ from __future__ import annotations
 import os
 from datetime import date, datetime
 
-import requests
-
 from weather_ensemble.config import Location, TIMEOUT_SECONDS
 from weather_ensemble.models import ForecastRecord
+from weather_ensemble.retry import get_with_retry
 
 
 def _to_float(value: object) -> float | None:
@@ -19,8 +18,7 @@ def _to_float(value: object) -> float | None:
 def _get_location_key(location: Location, api_key: str) -> str:
     url = "https://dataservice.accuweather.com/locations/v1/cities/geoposition/search"
     params = {"apikey": api_key, "q": f"{location.lat},{location.lon}"}
-    response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
     payload = response.json()
     try:
         return payload["Key"]
@@ -47,8 +45,7 @@ def fetch_forecast(location: Location) -> ForecastRecord:
 
     url = f"https://dataservice.accuweather.com/forecasts/v1/daily/5day/{location_key}"
     params = {"apikey": api_key, "metric": "true", "details": "true"}
-    response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
     payload = response.json()
 
     try:

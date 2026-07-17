@@ -3,10 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
-import requests
-
 from weather_ensemble.config import Location, TIMEOUT_SECONDS
 from weather_ensemble.models import ForecastRecord
+from weather_ensemble.retry import get_with_retry
 
 
 def _to_float(value: object) -> float | None:
@@ -23,8 +22,7 @@ def _local_date(iso_timestamp: str, timezone: str) -> date:
 
 def _geohash(location: Location) -> str:
     url = "https://api.weather.bom.gov.au/v1/locations"
-    response = requests.get(url, params={"search": f"{location.lat},{location.lon}"}, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, params={"search": f"{location.lat},{location.lon}"}, timeout=TIMEOUT_SECONDS)
     payload = response.json()
     try:
         return payload["data"][0]["geohash"]
@@ -47,8 +45,7 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     """
     geohash = _geohash(location)
     url = f"https://api.weather.bom.gov.au/v1/locations/{geohash}/forecasts/daily"
-    response = requests.get(url, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, timeout=TIMEOUT_SECONDS)
     payload = response.json()
 
     try:

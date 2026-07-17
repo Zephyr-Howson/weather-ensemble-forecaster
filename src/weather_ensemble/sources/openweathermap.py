@@ -4,10 +4,9 @@ import os
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-import requests
-
 from weather_ensemble.config import Location, TIMEOUT_SECONDS, local_today
 from weather_ensemble.models import ForecastRecord
+from weather_ensemble.retry import get_with_retry
 
 
 def _to_float(value: object) -> float | None:
@@ -69,8 +68,7 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         "appid": api_key,
         "units": "metric",
     }
-    response = requests.get(url, params=params, timeout=TIMEOUT_SECONDS)
-    response.raise_for_status()
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
     payload = response.json()
 
     try:
