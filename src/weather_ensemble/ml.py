@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pickle
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -117,10 +117,11 @@ def build_feature_table(db_path: Path, location: Location, window_days: int | No
     return _build_wide_feature_table(long_df, include_targets=True)
 
 
-def build_prediction_feature_table(db_path: Path, location: Location) -> pd.DataFrame:
-    """Build a wide feature row for tomorrow's date, in the location's local time."""
-    local_today = datetime.now(ZoneInfo(location.timezone)).date()
-    target_date = local_today + timedelta(days=1)
+def build_prediction_feature_table(db_path: Path, location: Location, target_date: date | None = None) -> pd.DataFrame:
+    """Build a wide feature row for target_date (default: tomorrow, in the location's local time)."""
+    if target_date is None:
+        local_today = datetime.now(ZoneInfo(location.timezone)).date()
+        target_date = local_today + timedelta(days=1)
     long_df = latest_forecasts_for_date(db_path, location, target_date)
     return _build_wide_feature_table(long_df, include_targets=False)
 
@@ -250,8 +251,13 @@ def load_model_bundle(model_dir: Path, target: str) -> TrainedModelBundle:
         return pickle.load(f)
 
 
-def predict_latest_ml(db_path: Path, location: Location, model_dir: Path) -> dict[str, Any]:
-    df = build_prediction_feature_table(db_path, location)
+def predict_latest_ml(db_path: Path, location: Location, model_dir: Path, target_date: date | None = None) -> dict[str, Any]:
+    """Predict target_date (default: tomorrow) with the currently trained models.
+
+    target_date exists for reconstructing a specific past day's live prediction
+    (e.g. one dropped by a database reset) rather than always "today+1".
+    """
+    df = build_prediction_feature_table(db_path, location, target_date=target_date)
     if df.empty:
         return {"error": "No forecasts found. Run collect first."}
 

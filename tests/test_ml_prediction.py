@@ -59,6 +59,30 @@ def test_build_prediction_feature_table_uses_tomorrow_forecasts(tmp_path):
     assert "open_meteo_gfs_global__max_temp" in df.columns
 
 
+def test_build_prediction_feature_table_honors_explicit_target_date(tmp_path):
+    """target_date exists to reconstruct a specific past day's prediction (e.g. one
+    dropped by a database reset) rather than always defaulting to tomorrow."""
+    db_path = tmp_path / "weather.db"
+    location = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
+    tomorrow = date.today() + timedelta(days=1)
+    a_past_date = date(2026, 6, 1)
+
+    with connect(db_path) as conn:
+        insert_forecasts(
+            conn,
+            [
+                _forecast_record("open_meteo_best_match", tomorrow, datetime.now().replace(microsecond=0), 25.0),
+                _forecast_record("open_meteo_best_match", a_past_date, datetime.now().replace(microsecond=0), 18.0),
+            ],
+        )
+
+    df = build_prediction_feature_table(db_path, location, target_date=a_past_date)
+
+    assert len(df) == 1
+    assert df["forecast_date"].iloc[0].date() == a_past_date
+    assert df["open_meteo_best_match__max_temp"].iloc[0] == 18.0
+
+
 def test_predict_latest_ml_uses_live_forecast_rows(tmp_path):
     db_path = tmp_path / "weather.db"
     model_dir = tmp_path / "models"

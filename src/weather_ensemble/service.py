@@ -302,13 +302,23 @@ def blend_weighted(forecast_df: pd.DataFrame, scores: dict[str, dict[str, float]
     return blended, metadata
 
 
-def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[str, Any]:
-    target_date = local_today(location) + timedelta(days=1)
+def blend_forecast(db_path: Path, location: Location, window_days: int, target_date: date | None = None) -> dict[str, Any]:
+    """Blend every source's forecast for target_date (default: tomorrow).
+
+    target_date exists for reconstructing a specific past day's live prediction
+    (e.g. one dropped by a database reset) rather than always "today+1" - the
+    history used for MAE weighting is explicitly bounded to strictly before
+    target_date so a backfilled reconstruction can't see data it "shouldn't
+    know yet" at that point in time, matching the walk-forward backtest's rule.
+    """
+    if target_date is None:
+        target_date = local_today(location) + timedelta(days=1)
     forecast_df = latest_forecasts_for_date(db_path, location, target_date)
     if forecast_df.empty:
         return {"error": "No forecasts found. Run collect first.", "forecast_date": target_date.isoformat()}
 
     history_df = load_modelling_table(db_path, location, window_days=window_days)
+    history_df = history_df[pd.to_datetime(history_df["forecast_date"]) < pd.Timestamp(target_date)]
     scores = compute_mae_scores(history_df)
     blended, metadata = blend_weighted(forecast_df, scores)
 
