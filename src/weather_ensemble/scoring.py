@@ -209,8 +209,15 @@ def rolling_error_over_time(long_df: pd.DataFrame, window: int = 7) -> pd.DataFr
     """Rolling mean absolute error per (target, model) over time, pooled across locations.
 
     Errors from every location on a given date are averaged first (one point per
-    date), then smoothed with a trailing `window`-day rolling mean - this is what
-    the "accuracy over time" chart plots.
+    date), then smoothed with a centered `window`-day rolling mean - this is what
+    the "accuracy over time" chart plots. Centered means a 7-day window is 3 days
+    before + the day itself + 3 days after, not the trailing 7 days ending on that
+    date. Near the most recent date there's no "after" data yet (it hasn't
+    happened), so `min_periods=1` lets the window use however many days are
+    actually available rather than going blank - which means each date within
+    `window // 2` days of the most recent one is recalculated (using more of its
+    "after" side) every time this runs, until enough days have passed to fill
+    the window on both sides.
     """
     if long_df.empty:
         return long_df
@@ -225,7 +232,7 @@ def rolling_error_over_time(long_df: pd.DataFrame, window: int = 7) -> pd.DataFr
     out = []
     for (target, model), group in daily.groupby(["target", "model"]):
         group = group.sort_values("forecast_date").copy()
-        group["rolling_mae"] = group["abs_error"].rolling(window=window, min_periods=1).mean()
+        group["rolling_mae"] = group["abs_error"].rolling(window=window, center=True, min_periods=1).mean()
         out.append(group)
     return pd.concat(out, ignore_index=True) if out else daily
 
