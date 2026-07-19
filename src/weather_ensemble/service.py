@@ -19,7 +19,7 @@ from weather_ensemble.config import (
     local_today,
 )
 from weather_ensemble.models import ActualRecord, ForecastRecord
-from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo, silo
+from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo, silo, weatherapi
 
 # requests' HTTPError messages embed the full request URL, and most providers here
 # put their API key in the query string - so printing an exception verbatim can leak
@@ -31,34 +31,58 @@ def _safe_error(exc: Exception) -> str:
     return _QUERY_STRING.sub("?<redacted>", str(exc))
 
 
-# SILO only ever supplies these fields (its DataDrill request is scoped to
-# rainfall/max/min temp - see sources/silo.py); every other target keeps
-# whatever open_meteo.fetch_actual returns.
-SILO_OVERRIDE_FIELDS = ["max_temp", "min_temp", "precipitation_sum", "did_rain"]
+# Each entry is (label, module, fields it's trusted to override). The module
+# (not a bound reference to module.fetch_actual) is stored deliberately, so
+# `module.fetch_actual` is looked up fresh on every call below - tests (and
+# anything else) that monkeypatch a source module's fetch_actual would
+# otherwise have no effect, since a reference captured here at import time
+# would keep pointing at the original function forever.
+#
+# Open-Meteo's Archive API is the base actual for everything else. SILO only
+# ever supplies rainfall/max/min temp (its DataDrill request is scoped to
+# those - see sources/silo.py). WeatherAPI's history endpoint is only trusted
+# for uv_index: Open-Meteo's archive never computes UV at all (uv_index_max is
+# always null - not part of the ERA5 reanalysis it's built from) and SILO
+# doesn't cover it either, but WeatherAPI's history.json does report an
+# observed uv value - see sources/weatherapi.py.
+_ACTUAL_OVERRIDE_SOURCES = [
+    ("silo", silo, ["max_temp", "min_temp", "precipitation_sum", "did_rain"]),
+    ("weatherapi", weatherapi, ["uv_index"]),
+]
 
 
 def _fetch_blended_actual(location: Location, target_date: date) -> ActualRecord:
-    """Open-Meteo actual, with SILO's ground truth substituted in where SILO has it.
+    """Open-Meteo actual, with independent ground-truth sources substituted in
+    field-by-field wherever they have data - see _ACTUAL_OVERRIDE_SOURCES.
 
-    SILO is an Australia-only, BOM-derived gridded climate dataset - a genuinely
-    independent ground truth, not a repackaging of the same reanalysis Open-Meteo
-    draws from. But it only covers rainfall/max/min temp (see SILO_OVERRIDE_FIELDS),
-    and the actuals table/every downstream join assumes exactly one actuals row per
-    (location, date) - see load_modelling_table. So rather than inserting SILO as a
-    second source row (which would silently duplicate every forecast row in that
-    join), this blends SILO's values into the single Open-Meteo-sourced row it
-    still is field-for-field. SILO being unreachable (no SILO_EMAIL, an outage, a
-    date it has no data for) degrades to the pure Open-Meteo record rather than
-    failing the whole call.
+    The actuals table/every downstream join assumes exactly one actuals row per
+    (location, date) - see load_modelling_table. So rather than inserting each
+    extra source as its own row (which would silently duplicate every forecast
+    row in that join), this blends each one's values into the single
+    Open-Meteo-sourced row it still is field-for-field. Any override source
+    being unreachable (missing API key, an outage, a date it has no data for)
+    just leaves those fields as Open-Meteo's rather than failing the whole call.
     """
     base = open_meteo.fetch_actual(location, target_date)
-    try:
-        silo_actual = silo.fetch_actual(location, target_date)
-    except Exception as exc:
-        print(f"WARN: silo actual failed for {location.name} {target_date}: {_safe_error(exc)}")
-        return base
 
-    overrides = {f: getattr(silo_actual, f) for f in SILO_OVERRIDE_FIELDS if getattr(silo_actual, f) is not None}
+    overrides: dict[str, Any] = {}
+    raw_json: dict[str, Any] = {"open_meteo": base.raw_json}
+    provenance: dict[str, list[str]] = {}
+
+    for label, module, fields in _ACTUAL_OVERRIDE_SOURCES:
+        try:
+            override_actual = module.fetch_actual(location, target_date)
+        except Exception as exc:
+            print(f"WARN: {label} actual failed for {location.name} {target_date}: {_safe_error(exc)}")
+            continue
+
+        found = {f: getattr(override_actual, f) for f in fields if getattr(override_actual, f) is not None}
+        if not found:
+            continue
+        overrides.update(found)
+        raw_json[label] = override_actual.raw_json
+        provenance[label] = sorted(found)
+
     if not overrides:
         return base
     # `source` deliberately stays "open_meteo" (not e.g. "open_meteo+silo"):
@@ -66,11 +90,8 @@ def _fetch_blended_actual(location: Location, target_date: date) -> ActualRecord
     # so changing it here would insert a second row instead of updating the
     # existing one - silently recreating the exact duplicate-row-per-day bug
     # this whole blend exists to avoid. Provenance is recorded in raw_json instead.
-    overrides["raw_json"] = {
-        "open_meteo": base.raw_json,
-        "silo": silo_actual.raw_json,
-        "silo_overridden_fields": sorted(overrides.keys()),
-    }
+    raw_json["overridden_fields_by_source"] = provenance
+    overrides["raw_json"] = raw_json
     return replace(base, **overrides)
 
 

@@ -89,27 +89,39 @@ collects successfully.
   `min_temp`, `precipitation_sum`, `did_rain` (derived from
   `precipitation_sum >= RAIN_THRESHOLD_MM`, default 0.2mm), `uv_index`,
   `wind_speed`, `wind_gusts`, `cloud_cover`, `humidity`, `pressure_msl`,
-  `weather_code`.
-- **`silo`** (`sources/silo.py`) — Australia-only, government-run, gridded
-  daily climate data built from BOM's own station network, going back to
-  1889; a genuinely independent ground truth, not a repackaging of the same
-  reanalysis Open-Meteo uses. Needs only `SILO_EMAIL` (an email address for
-  usage tracking, not a formal API key) — leave it blank in `.env` to skip
-  SILO entirely and fall back to pure Open-Meteo actuals. SILO only ever
-  requests rainfall/max/min temp (its DataDrill query is scoped to just
-  those), so rather than being a second row per day (the `actuals` table's
-  forecast-to-actual join assumes exactly one row per (location, date); a
-  second source row there would silently duplicate every forecast row in the
-  join), `record_actual`/`backfill` blend it in as a per-field override onto
-  the Open-Meteo row for exactly `max_temp`/`min_temp`/`precipitation_sum`/
-  `did_rain` — see `service._fetch_blended_actual`. The row's `source` column
-  deliberately stays `open_meteo` either way (changing it would insert a
-  second row instead of updating the existing one, recreating the exact
-  duplicate-row-per-day problem this blend exists to avoid); provenance
-  (which fields SILO actually overrode, if any) is recorded in `raw_json`
-  instead. Every other field (`uv_index`, `wind_speed`, `wind_gusts`,
-  `cloud_cover`, `humidity`, `pressure_msl`, `weather_code`) always comes
-  from Open-Meteo, since SILO doesn't collect them.
+  `weather_code`. One field is a structural gap, not a code bug: its
+  `uv_index_max` is always `null` (verified directly against the API) since
+  UV index isn't part of the ERA5 reanalysis the Archive API is built from —
+  see the WeatherAPI entry below for how that gap is filled.
+- The `actuals` table/every downstream join assumes exactly one row per
+  (location, date) — see `load_modelling_table` — so two independent ground-
+  truth sources are blended in as **per-field overrides** onto the single
+  Open-Meteo-sourced row (`service._fetch_blended_actual`), rather than each
+  getting a row of their own (which would silently duplicate every forecast
+  row in that join). The row's `source` column deliberately stays
+  `open_meteo_archive` regardless of which fields got overridden — changing
+  it would insert a second row instead of updating the existing one,
+  recreating the exact duplicate-row-per-day problem this blend exists to
+  avoid. Provenance (which fields each source actually overrode, if any) is
+  recorded in `raw_json["overridden_fields_by_source"]` instead. Any override
+  source being unreachable (missing key/email, an outage, no data for that
+  date) just leaves those fields as Open-Meteo's.
+  - **`silo`** (`sources/silo.py`) — Australia-only, government-run, gridded
+    daily climate data built from BOM's own station network, going back to
+    1889; a genuinely independent ground truth, not a repackaging of the same
+    reanalysis Open-Meteo uses. Needs only `SILO_EMAIL` (an email address for
+    usage tracking, not a formal API key) — leave it blank in `.env` to skip
+    it. Only ever overrides `max_temp`/`min_temp`/`precipitation_sum`/
+    `did_rain` (its DataDrill query is scoped to just rainfall/max/min temp).
+  - **`weatherapi`** (`sources/weatherapi.py`, `fetch_actual`) — only ever
+    overrides `uv_index`, specifically to fill the gap Open-Meteo's Archive
+    API leaves. Uses WeatherAPI's `history.json` endpoint (the same
+    `WEATHERAPI_KEY` used for forecasts) — unlike its forecast endpoint, this
+    genuinely returns past observations, so it's exactly what an actuals
+    source needs (it just isn't a substitute for backfilling *forecasts*,
+    which Open-Meteo still handles). Every other field it returns
+    (temperature, humidity, wind, etc.) is deliberately left unused here so
+    it doesn't quietly override a better-established actual.
 
 ### Reliability: retry with backoff
 

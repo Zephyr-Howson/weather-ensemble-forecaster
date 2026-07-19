@@ -34,9 +34,7 @@ TARGET_LABELS = {
 }
 
 RECENT_DAYS_COUNT = 5
-# UV index is excluded here - ML never trains a predictor for it (no source
-# reliably supplies it as a feature), so it would be blank on every row.
-RECENT_TARGETS = [t for t in TARGETS if t != "uv_index"]
+RECENT_TARGETS = list(TARGETS)
 RECENT_UNITS = {
     "max_temp": "°C",
     "min_temp": "°C",
