@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,8 +18,8 @@ from weather_ensemble.config import (
     TARGETS,
     local_today,
 )
-from weather_ensemble.models import ForecastRecord
-from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo
+from weather_ensemble.models import ActualRecord, ForecastRecord
+from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo, silo
 
 # requests' HTTPError messages embed the full request URL, and most providers here
 # put their API key in the query string - so printing an exception verbatim can leak
@@ -28,6 +29,49 @@ _QUERY_STRING = re.compile(r"\?\S*")
 
 def _safe_error(exc: Exception) -> str:
     return _QUERY_STRING.sub("?<redacted>", str(exc))
+
+
+# SILO only ever supplies these fields (its DataDrill request is scoped to
+# rainfall/max/min temp - see sources/silo.py); every other target keeps
+# whatever open_meteo.fetch_actual returns.
+SILO_OVERRIDE_FIELDS = ["max_temp", "min_temp", "precipitation_sum", "did_rain"]
+
+
+def _fetch_blended_actual(location: Location, target_date: date) -> ActualRecord:
+    """Open-Meteo actual, with SILO's ground truth substituted in where SILO has it.
+
+    SILO is an Australia-only, BOM-derived gridded climate dataset - a genuinely
+    independent ground truth, not a repackaging of the same reanalysis Open-Meteo
+    draws from. But it only covers rainfall/max/min temp (see SILO_OVERRIDE_FIELDS),
+    and the actuals table/every downstream join assumes exactly one actuals row per
+    (location, date) - see load_modelling_table. So rather than inserting SILO as a
+    second source row (which would silently duplicate every forecast row in that
+    join), this blends SILO's values into the single Open-Meteo-sourced row it
+    still is field-for-field. SILO being unreachable (no SILO_EMAIL, an outage, a
+    date it has no data for) degrades to the pure Open-Meteo record rather than
+    failing the whole call.
+    """
+    base = open_meteo.fetch_actual(location, target_date)
+    try:
+        silo_actual = silo.fetch_actual(location, target_date)
+    except Exception as exc:
+        print(f"WARN: silo actual failed for {location.name} {target_date}: {_safe_error(exc)}")
+        return base
+
+    overrides = {f: getattr(silo_actual, f) for f in SILO_OVERRIDE_FIELDS if getattr(silo_actual, f) is not None}
+    if not overrides:
+        return base
+    # `source` deliberately stays "open_meteo" (not e.g. "open_meteo+silo"):
+    # db.upsert_actual's ON CONFLICT key is (source, location_name, actual_date),
+    # so changing it here would insert a second row instead of updating the
+    # existing one - silently recreating the exact duplicate-row-per-day bug
+    # this whole blend exists to avoid. Provenance is recorded in raw_json instead.
+    overrides["raw_json"] = {
+        "open_meteo": base.raw_json,
+        "silo": silo_actual.raw_json,
+        "silo_overridden_fields": sorted(overrides.keys()),
+    }
+    return replace(base, **overrides)
 
 
 def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]:
@@ -64,7 +108,7 @@ def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastR
 def record_actual(db_path: Path, location: Location, target_date: date | None = None) -> None:
     if target_date is None:
         target_date = local_today(location) - timedelta(days=1)
-    actual = open_meteo.fetch_actual(location, target_date)
+    actual = _fetch_blended_actual(location, target_date)
     with db.connect(db_path) as conn:
         db.upsert_actual(conn, actual)
 
@@ -75,12 +119,14 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
     Open-Meteo is intentionally the backbone here because its Historical
     Forecast API lets us retrieve archived forecasts rather than just observed
     weather. Optional providers are live-only and are not backfilled here.
+    Actuals still get SILO's rainfall/max/min temp blended in - see
+    _fetch_blended_actual - since SILO's DataDrill archive goes back to 1889.
     """
     today = local_today(location)
     with db.connect(db_path) as conn:
         for i in range(1, days_back + 1):
             try:
-                actual = open_meteo.fetch_actual(location, today - timedelta(days=i))
+                actual = _fetch_blended_actual(location, today - timedelta(days=i))
                 db.upsert_actual(conn, actual)
             except Exception as exc:
                 print(f"WARN: actual backfill failed for day -{i}: {_safe_error(exc)}")
@@ -149,6 +195,9 @@ def compute_mae_scores(df: pd.DataFrame) -> dict[str, dict[str, float]]:
         "uv_index": "actual_uv_index",
         "wind_speed": "actual_wind_speed",
         "wind_gusts": "actual_wind_gusts",
+        "cloud_cover": "actual_cloud_cover",
+        "humidity": "actual_humidity",
+        "pressure_msl": "actual_pressure_msl",
     }
 
     for source, source_df in df.groupby("source"):
@@ -196,7 +245,10 @@ def blend_weighted(forecast_df: pd.DataFrame, scores: dict[str, dict[str, float]
     metadata: dict[str, Any] = {"scores": scores, "sources": forecast_df["source"].tolist()}
 
     # Weighted baseline is still useful for directly comparable continuous vars.
-    blendable = ["max_temp", "min_temp", "precipitation_sum", "uv_index", "wind_speed", "wind_gusts"]
+    blendable = [
+        "max_temp", "min_temp", "precipitation_sum", "uv_index", "wind_speed", "wind_gusts",
+        "cloud_cover", "humidity", "pressure_msl",
+    ]
     for var in blendable:
         rows = forecast_df[["source", var]].dropna()
         if rows.empty:
@@ -245,15 +297,16 @@ def blend_forecast(db_path: Path, location: Location, window_days: int) -> dict[
             INSERT OR IGNORE INTO ensemble_predictions (
                 location_name, lat, lon, forecast_date, generated_at, window_days,
                 max_temp, min_temp, rain_probability, precipitation_sum, did_rain,
-                uv_index, wind_speed, wind_gusts, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                uv_index, wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 location.name, location.lat, location.lon, target_date.isoformat(),
                 datetime.now().isoformat(timespec="seconds"), window_days,
                 blended.get("max_temp"), blended.get("min_temp"), blended.get("rain_probability"),
                 blended.get("precipitation_sum"), blended.get("did_rain"), blended.get("uv_index"),
-                blended.get("wind_speed"), blended.get("wind_gusts"), json.dumps(metadata),
+                blended.get("wind_speed"), blended.get("wind_gusts"), blended.get("cloud_cover"),
+                blended.get("humidity"), blended.get("pressure_msl"), json.dumps(metadata),
             ),
         )
         conn.commit()

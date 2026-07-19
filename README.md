@@ -84,23 +84,32 @@ collects successfully.
 ### Actuals (the ground truth)
 
 - **`open_meteo_archive`** (via Open-Meteo's Historical Weather API) is the
-  default and only actively-used actuals source, called by both
-  `record_actual` (yesterday, every night) and `backfill` (a whole date
-  range at once). Reports `max_temp`, `min_temp`, `precipitation_sum`,
-  `did_rain` (derived from `precipitation_sum >= RAIN_THRESHOLD_MM`, default
-  0.2mm), `uv_index`, `wind_speed`, `wind_gusts`, `cloud_cover`, `humidity`,
-  `pressure_msl`, `weather_code`.
+  backbone actuals source, called by both `record_actual` (yesterday, every
+  night) and `backfill` (a whole date range at once). Reports `max_temp`,
+  `min_temp`, `precipitation_sum`, `did_rain` (derived from
+  `precipitation_sum >= RAIN_THRESHOLD_MM`, default 0.2mm), `uv_index`,
+  `wind_speed`, `wind_gusts`, `cloud_cover`, `humidity`, `pressure_msl`,
+  `weather_code`.
 - **`silo`** (`sources/silo.py`) — Australia-only, government-run, gridded
   daily climate data built from BOM's own station network, going back to
   1889; a genuinely independent ground truth, not a repackaging of the same
   reanalysis Open-Meteo uses. Needs only `SILO_EMAIL` (an email address for
-  usage tracking, not a formal API key). **Not wired into the automated
-  pipeline** — the `actuals` table technically allows more than one source
-  per day, but `load_modelling_table`'s forecast-to-actual join assumes
-  exactly one actuals row per (location, date); adding a second source there
-  would silently duplicate every forecast row in the join. Call
-  `silo.fetch_actual` directly if you want to compare against it or switch to
-  it deliberately.
+  usage tracking, not a formal API key) — leave it blank in `.env` to skip
+  SILO entirely and fall back to pure Open-Meteo actuals. SILO only ever
+  requests rainfall/max/min temp (its DataDrill query is scoped to just
+  those), so rather than being a second row per day (the `actuals` table's
+  forecast-to-actual join assumes exactly one row per (location, date); a
+  second source row there would silently duplicate every forecast row in the
+  join), `record_actual`/`backfill` blend it in as a per-field override onto
+  the Open-Meteo row for exactly `max_temp`/`min_temp`/`precipitation_sum`/
+  `did_rain` — see `service._fetch_blended_actual`. The row's `source` column
+  deliberately stays `open_meteo` either way (changing it would insert a
+  second row instead of updating the existing one, recreating the exact
+  duplicate-row-per-day problem this blend exists to avoid); provenance
+  (which fields SILO actually overrode, if any) is recorded in `raw_json`
+  instead. Every other field (`uv_index`, `wind_speed`, `wind_gusts`,
+  `cloud_cover`, `humidity`, `pressure_msl`, `weather_code`) always comes
+  from Open-Meteo, since SILO doesn't collect them.
 
 ### Reliability: retry with backoff
 
@@ -133,11 +142,11 @@ A separate Ridge Regression (continuous variables) or Logistic Regression
 location's full history of every source's forecast plus cross-source
 agreement features (mean/median/std/min/max/range/count across sources) and
 date features (month, day of year, day of week). Stored in
-`ml_predictions`. `precipitation_sum`, `wind_speed`, `wind_gusts`, and
-`uv_index` predictions are clipped at 0 before being stored or scored
-(`ml.clip_prediction`) — Ridge has no non-negativity constraint and can
-otherwise predict a small negative value for a quantity that physically can't
-go below zero.
+`ml_predictions`. `precipitation_sum`, `wind_speed`, `wind_gusts`, `uv_index`,
+`cloud_cover`, `humidity`, and `pressure_msl` predictions are clipped at 0
+before being stored or scored (`ml.clip_prediction`) — Ridge has no
+non-negativity constraint and can otherwise predict a small negative value
+for a quantity that physically can't go below zero.
 
 ### Walk-forward backtest
 

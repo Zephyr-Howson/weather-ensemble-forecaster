@@ -28,6 +28,9 @@ TARGET_LABELS = {
     "uv_index": "UV index",
     "wind_speed": "Wind speed",
     "wind_gusts": "Wind gusts",
+    "cloud_cover": "Cloud cover",
+    "humidity": "Humidity",
+    "pressure_msl": "Pressure (MSL)",
 }
 
 RECENT_DAYS_COUNT = 5
@@ -40,6 +43,9 @@ RECENT_UNITS = {
     "precipitation_sum": "mm",
     "wind_speed": "km/h",
     "wind_gusts": "km/h",
+    "cloud_cover": "%",
+    "humidity": "%",
+    "pressure_msl": "hPa",
 }
 
 

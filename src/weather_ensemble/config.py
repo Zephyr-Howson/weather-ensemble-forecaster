@@ -38,6 +38,9 @@ TARGETS: dict[str, str] = {
     "uv_index": "Actual UV index",
     "wind_speed": "Actual wind speed (km/h)",
     "wind_gusts": "Actual wind gusts (km/h)",
+    "cloud_cover": "Actual cloud cover (%)",
+    "humidity": "Actual relative humidity (%)",
+    "pressure_msl": "Actual mean sea-level pressure (hPa)",
 }
 
 RAIN_THRESHOLD_MM = float(os.getenv("RAIN_THRESHOLD_MM", "0.2"))

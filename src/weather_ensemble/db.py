@@ -132,6 +132,9 @@ def init_db(conn: sqlite3.Connection) -> None:
             uv_index REAL,
             wind_speed REAL,
             wind_gusts REAL,
+            cloud_cover REAL,
+            humidity REAL,
+            pressure_msl REAL,
             metadata_json TEXT,
             UNIQUE(location_name, forecast_date, generated_at)
         );
@@ -147,6 +150,8 @@ def init_db(conn: sqlite3.Connection) -> None:
     # Earlier versions had actuals.rain_probability. Leave it if present; no new code uses it.
     for col in ["precipitation_sum", "did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
         _add_column_if_missing(conn, "ensemble_predictions", col, "REAL")
+    for col in ["cloud_cover", "humidity", "pressure_msl"]:
+        _add_column_if_missing(conn, "ml_predictions", col, "REAL")
 
     # Rows inserted before collection_method existed have no way to record how
     # they were collected. Recover it from the raw_json tag that
