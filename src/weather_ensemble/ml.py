@@ -40,9 +40,22 @@ NON_NEGATIVE_TARGETS = {
     "cloud_cover", "humidity", "pressure_msl",
 }
 
+# Ridge also has no upper bound, and these two are percentages that can't
+# physically exceed 100 - normally harmless, but a row with a missing/imputed
+# feature can push the model to extrapolate past it (a real incident: 467.9%
+# predicted cloud cover for one location on a day several of its forecast
+# sources had a gap). Wind/precipitation/UV have no fixed physical ceiling
+# worth enforcing the same way.
+PERCENTAGE_TARGETS = {"cloud_cover", "humidity"}
+
 
 def clip_prediction(target_name: str, value: float) -> float:
-    return max(0.0, value) if target_name in NON_NEGATIVE_TARGETS else value
+    if target_name not in NON_NEGATIVE_TARGETS:
+        return value
+    value = max(0.0, value)
+    if target_name in PERCENTAGE_TARGETS:
+        value = min(100.0, value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -95,6 +108,21 @@ def _build_wide_feature_table(long_df: pd.DataFrame, include_targets: bool) -> p
             wide[f"source_max__{var}"] = wide[source_cols].max(axis=1)
             wide[f"source_range__{var}"] = wide[f"source_max__{var}"] - wide[f"source_min__{var}"]
             wide[f"source_count__{var}"] = wide[source_cols].notna().sum(axis=1)
+
+            # A source missing on one particular day (a collection gap, a
+            # provider outage) leaves that column NaN just for this row, which
+            # the model pipeline's SimpleImputer would otherwise fill from a
+            # column-wide historical median - a value with no relationship to
+            # what every other source is actually saying about this specific
+            # day. That mismatch is what let one missing feature drag a Ridge
+            # prediction to a physically impossible 467.9% cloud cover on a
+            # real incident. Filling from this row's own cross-source median
+            # instead grounds the substitute in today's actual conditions.
+            # This must happen after the spread stats above are computed - an
+            # already-filled column would understate source_std/source_range,
+            # falsely implying every source agreed when one was silently a
+            # stand-in for the rest.
+            wide[source_cols] = wide[source_cols].apply(lambda col: col.fillna(wide[f"source_median__{var}"]))
 
     return wide.sort_values("forecast_date")
 
@@ -251,6 +279,29 @@ def load_model_bundle(model_dir: Path, target: str) -> TrainedModelBundle:
         return pickle.load(f)
 
 
+def _fill_missing_sources_from_row_median(X: pd.DataFrame, raw: pd.DataFrame, var: str) -> pd.DataFrame:
+    """Fill any of var's per-source feature columns that are missing in X after
+    reindexing to the trained model's feature set, using this row's own
+    cross-source median for var - computed fresh from whatever sources
+    actually reported in `raw`, not the columns the pipeline's SimpleImputer
+    would otherwise fall back to (a historical median from whenever the model
+    was trained, with no relationship to this specific day's conditions).
+
+    _build_wide_feature_table's own fallback fill (used by training/backtest,
+    which always builds from a multi-day table) only helps when a source's
+    column already exists elsewhere in the window; a source absent from a
+    single-day live prediction never gets a column there at all - reindex
+    introduces it as all-NaN - so this covers that case specifically.
+    """
+    source_cols = [c for c in X.columns if c.endswith(f"__{var}") and not c.startswith("source_")]
+    if not source_cols:
+        return X
+    row_median = raw.reindex(columns=source_cols).median(axis=1)
+    X = X.copy()
+    X[source_cols] = X[source_cols].apply(lambda col: col.fillna(row_median))
+    return X
+
+
 def predict_latest_ml(db_path: Path, location: Location, model_dir: Path, target_date: date | None = None) -> dict[str, Any]:
     """Predict target_date (default: tomorrow) with the currently trained models.
 
@@ -272,6 +323,8 @@ def predict_latest_ml(db_path: Path, location: Location, model_dir: Path, target
             continue
         bundle = load_model_bundle(model_dir, target)
         X = latest.reindex(columns=bundle.features)
+        feature_var = FEATURE_TARGET_OVERRIDE.get(target, target)
+        X = _fill_missing_sources_from_row_median(X, latest, feature_var)
         if bundle.model_type == "classification":
             klass = int(bundle.model.predict(X)[0])
             predictions[target] = klass
