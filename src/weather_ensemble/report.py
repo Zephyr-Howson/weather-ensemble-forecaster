@@ -20,6 +20,46 @@ from weather_ensemble.scoring import (
 )
 from weather_ensemble.sources import FORECAST_SOURCES
 
+
+def _js_object_assignment(var_name: str, data: dict) -> str:
+    """`window.VAR = {...}` as one assignment per top-level key instead of a
+    single json.dumps of the whole dict on one line.
+
+    A generated report with 30 locations' worth of MAE/trend history embeds
+    megabytes of JSON - as one line, that's long enough that most diff tools
+    (VS Code's included) give up computing a real line-by-line comparison and
+    fall back to "whole line changed", making every regenerated report look
+    like a total rewrite. Splitting into one line per key keeps each line's
+    content bounded by a single location/target's data - typically tens of KB,
+    not megabytes - so a diff can actually localize what changed. The runtime
+    result is identical either way; only how it's written to the file differs.
+    """
+    lines = [f"window.{var_name} = {{}};"]
+    for key, value in data.items():
+        lines.append(f"window.{var_name}[{json.dumps(key)}] = {json.dumps(value)};")
+    return "\n".join(lines)
+
+
+def _location_data_script(location_data: dict) -> str:
+    """Same one-assignment-per-line idea as _js_object_assignment, but one
+    level deeper: location_data is target -> {"locations": {location: {...}},
+    ...other small keys}, and "locations" (30 locations' full MAE/trend
+    history) is what actually makes a single target's line hundreds of KB.
+    Splitting that inner dict too bounds every line to roughly one location's
+    worth of data - tens of KB, comfortably below where diff tools give up.
+    """
+    lines = ["window.__LOCATION_DATA = {};"]
+    for target, spec in location_data.items():
+        target_json = json.dumps(target)
+        shallow = {k: v for k, v in spec.items() if k != "locations"}
+        lines.append(f"window.__LOCATION_DATA[{target_json}] = {json.dumps(shallow)};")
+        lines.append(f'window.__LOCATION_DATA[{target_json}]["locations"] = {{}};')
+        for location_name, location_spec in spec["locations"].items():
+            location_json = json.dumps(location_name)
+            lines.append(f'window.__LOCATION_DATA[{target_json}]["locations"][{location_json}] = {json.dumps(location_spec)};')
+    return "\n".join(lines)
+
+
 TARGET_LABELS = {
     "max_temp": "Max temperature",
     "min_temp": "Min temperature",
@@ -147,7 +187,7 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
 def _recent_forecast_script(recent_data: dict) -> str:
     return f"""
 <script>
-window.__RECENT_DATA = {json.dumps(recent_data)};
+{_js_object_assignment("__RECENT_DATA", recent_data)}
 window.__RECENT_UNITS = {json.dumps(RECENT_UNITS)};
 window.__formatRecentValue = function (target, value) {{
   if (value === null || value === undefined) return "—";
@@ -613,7 +653,7 @@ document.addEventListener("DOMContentLoaded", function () {{
 def _controls_script(location_data: dict) -> str:
     return f"""
 <script>
-window.__LOCATION_DATA = {json.dumps(location_data)};
+{_location_data_script(location_data)}
 function renderCharts() {{
   var select = document.getElementById("location-select");
   var baselineToggle = document.getElementById("baseline-toggle");
