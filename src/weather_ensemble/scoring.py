@@ -82,11 +82,11 @@ def _ensemble_predictions(db_path: Path, location: Location) -> list[dict]:
                 WHERE location_name = ?
             )
             SELECT e.location_name, e.forecast_date, e.max_temp, e.min_temp,
-                   e.precipitation_sum, e.did_rain, e.uv_index, e.wind_speed, e.wind_gusts,
+                   e.precipitation_sum, e.did_rain, e.wind_speed, e.wind_gusts,
                    e.cloud_cover, e.humidity, e.pressure_msl,
                    a.max_temp AS actual_max_temp, a.min_temp AS actual_min_temp,
                    a.precipitation_sum AS actual_precipitation_sum, a.did_rain AS actual_did_rain,
-                   a.uv_index AS actual_uv_index, a.wind_speed AS actual_wind_speed,
+                   a.wind_speed AS actual_wind_speed,
                    a.wind_gusts AS actual_wind_gusts, a.cloud_cover AS actual_cloud_cover,
                    a.humidity AS actual_humidity, a.pressure_msl AS actual_pressure_msl
             FROM latest e
@@ -113,11 +113,11 @@ def _ml_predictions(db_path: Path, location: Location) -> list[dict]:
                 WHERE location_name = ?
             )
             SELECT m.location_name, m.forecast_date, m.max_temp, m.min_temp,
-                   m.precipitation_sum, m.did_rain, m.uv_index, m.wind_speed, m.wind_gusts,
+                   m.precipitation_sum, m.did_rain, m.wind_speed, m.wind_gusts,
                    m.cloud_cover, m.humidity, m.pressure_msl,
                    a.max_temp AS actual_max_temp, a.min_temp AS actual_min_temp,
                    a.precipitation_sum AS actual_precipitation_sum, a.did_rain AS actual_did_rain,
-                   a.uv_index AS actual_uv_index, a.wind_speed AS actual_wind_speed,
+                   a.wind_speed AS actual_wind_speed,
                    a.wind_gusts AS actual_wind_gusts, a.cloud_cover AS actual_cloud_cover,
                    a.humidity AS actual_humidity, a.pressure_msl AS actual_pressure_msl
             FROM latest m
@@ -147,7 +147,7 @@ def _baseline_predictions(
     with db.connect(db_path) as conn:
         actuals = pd.read_sql_query(
             "SELECT location_name, actual_date, max_temp, min_temp, precipitation_sum, "
-            "did_rain, uv_index, wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl "
+            "did_rain, wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl "
             "FROM actuals "
             "WHERE location_name = ? ORDER BY actual_date",
             conn,

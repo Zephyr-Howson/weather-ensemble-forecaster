@@ -70,13 +70,13 @@ def _backtest_ensemble(
         INSERT OR IGNORE INTO ensemble_predictions (
             location_name, lat, lon, forecast_date, generated_at, window_days,
             max_temp, min_temp, rain_probability, precipitation_sum, did_rain,
-            uv_index, wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             location.name, location.lat, location.lon, d_iso, _generated_at_for(target_date), window_days,
             blended.get("max_temp"), blended.get("min_temp"), blended.get("rain_probability"),
-            blended.get("precipitation_sum"), blended.get("did_rain"), blended.get("uv_index"),
+            blended.get("precipitation_sum"), blended.get("did_rain"),
             blended.get("wind_speed"), blended.get("wind_gusts"), blended.get("cloud_cover"),
             blended.get("humidity"), blended.get("pressure_msl"), json.dumps(metadata),
         ),
@@ -140,14 +140,14 @@ def _backtest_ml(
         INSERT OR IGNORE INTO ml_predictions (
             location_name, lat, lon, forecast_date, generated_at, model_version,
             max_temp, min_temp, precipitation_sum, did_rain, did_rain_probability,
-            uv_index, wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             location.name, location.lat, location.lon, d_iso, _generated_at_for(target_date), BACKTEST_MODEL_VERSION,
             predictions.get("max_temp"), predictions.get("min_temp"), predictions.get("precipitation_sum"),
             predictions.get("did_rain"), predictions.get("did_rain_probability"),
-            predictions.get("uv_index"), predictions.get("wind_speed"), predictions.get("wind_gusts"),
+            predictions.get("wind_speed"), predictions.get("wind_gusts"),
             predictions.get("cloud_cover"), predictions.get("humidity"), predictions.get("pressure_msl"),
             json.dumps(metadata),
         ),

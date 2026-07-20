@@ -17,7 +17,6 @@ class ForecastRecord:
     min_temp: float | None = None
     rain_probability: float | None = None
     precipitation_sum: float | None = None
-    uv_index: float | None = None
     wind_speed: float | None = None
     wind_gusts: float | None = None
     cloud_cover: float | None = None
@@ -40,7 +39,6 @@ class ActualRecord:
     min_temp: float | None = None
     precipitation_sum: float | None = None
     did_rain: int | None = None
-    uv_index: float | None = None
     wind_speed: float | None = None
     wind_gusts: float | None = None
     cloud_cover: float | None = None

@@ -33,7 +33,6 @@ def _forecast(source: str, forecast_date: date, max_temp: float, precipitation_s
         max_temp=max_temp,
         min_temp=max_temp - 5,
         precipitation_sum=precipitation_sum,
-        uv_index=3.0,
         wind_speed=20.0,
         wind_gusts=30.0,
         raw_json={},
@@ -52,7 +51,6 @@ def _actual(actual_date: date, max_temp: float, precipitation_sum: float = 0.0) 
         min_temp=max_temp - 5,
         precipitation_sum=precipitation_sum,
         did_rain=int(precipitation_sum >= 0.2),
-        uv_index=3.0,
         wind_speed=20.0,
         wind_gusts=30.0,
     )

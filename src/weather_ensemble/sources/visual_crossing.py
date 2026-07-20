@@ -75,7 +75,6 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         min_temp=_to_float(day.get("tempmin")),
         rain_probability=_to_float(day.get("precipprob")),
         precipitation_sum=_to_float(day.get("precip")),
-        uv_index=_to_float(day.get("uvindex")),
         wind_speed=_to_float(day.get("windspeed")),
         wind_gusts=wind_gusts if wind_gusts is not None else _max(hours, "windgust"),
         cloud_cover=cloud_cover if cloud_cover is not None else _mean(hours, "cloudcover"),

@@ -73,7 +73,6 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         min_temp=_to_float(temperature.get("Minimum", {}).get("Value")),
         rain_probability=_to_float(day_part.get("PrecipitationProbability")),
         precipitation_sum=_to_float(precip.get("Value") if isinstance(precip, dict) else None),
-        uv_index=None,  # Not exposed by the base 5-day forecast endpoint.
         wind_speed=_to_float(wind.get("Value")),  # AccuWeather's metric wind speed is already km/h.
         wind_gusts=_to_float(wind_gust.get("Value")),
         cloud_cover=_to_float(day_part.get("CloudCover")),

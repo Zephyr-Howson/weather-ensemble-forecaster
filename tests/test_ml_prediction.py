@@ -33,7 +33,6 @@ def _forecast_record(source: str, forecast_date: date, collected_at: datetime, v
         min_temp=value - 5,
         rain_probability=25.0,
         precipitation_sum=1.0,
-        uv_index=3.0,
         wind_speed=20.0,
         wind_gusts=30.0,
         cloud_cover=40.0,
@@ -208,7 +207,6 @@ def test_clip_prediction_floors_non_negative_targets_at_zero():
     assert clip_prediction("precipitation_sum", -0.6) == 0.0
     assert clip_prediction("wind_speed", -1.0) == 0.0
     assert clip_prediction("wind_gusts", -1.0) == 0.0
-    assert clip_prediction("uv_index", -0.1) == 0.0
     assert clip_prediction("precipitation_sum", 2.3) == 2.3
 
 
@@ -252,7 +250,6 @@ def test_clip_prediction_caps_percentage_targets_at_100():
 def test_clip_prediction_does_not_cap_non_percentage_targets():
     assert clip_prediction("wind_gusts", 150.0) == 150.0
     assert clip_prediction("precipitation_sum", 200.0) == 200.0
-    assert clip_prediction("uv_index", 15.0) == 15.0
 
 
 def test_predict_latest_ml_clips_negative_precipitation_to_zero(tmp_path):

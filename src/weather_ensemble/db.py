@@ -9,14 +9,14 @@ from weather_ensemble.models import ActualRecord, ForecastRecord
 
 FORECAST_COLUMNS = [
     "source", "location_name", "lat", "lon", "forecast_date", "collected_at",
-    "max_temp", "min_temp", "rain_probability", "precipitation_sum", "uv_index",
+    "max_temp", "min_temp", "rain_probability", "precipitation_sum",
     "wind_speed", "wind_gusts", "cloud_cover", "humidity", "pressure_msl",
     "weather_code", "raw_json", "collection_method",
 ]
 
 ACTUAL_COLUMNS = [
     "source", "location_name", "lat", "lon", "actual_date", "collected_at",
-    "max_temp", "min_temp", "precipitation_sum", "did_rain", "uv_index",
+    "max_temp", "min_temp", "precipitation_sum", "did_rain",
     "wind_speed", "wind_gusts", "cloud_cover", "humidity", "pressure_msl",
     "weather_code", "raw_json",
 ]
@@ -36,6 +36,12 @@ def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, de
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
+def _drop_column_if_present(conn: sqlite3.Connection, table: str, column: str) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column in existing:
+        conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
+
+
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(
         """
@@ -51,7 +57,6 @@ def init_db(conn: sqlite3.Connection) -> None:
             min_temp REAL,
             rain_probability REAL,
             precipitation_sum REAL,
-            uv_index REAL,
             wind_speed REAL,
             wind_gusts REAL,
             cloud_cover REAL,
@@ -78,7 +83,6 @@ def init_db(conn: sqlite3.Connection) -> None:
             min_temp REAL,
             precipitation_sum REAL,
             did_rain INTEGER,
-            uv_index REAL,
             wind_speed REAL,
             wind_gusts REAL,
             cloud_cover REAL,
@@ -105,7 +109,6 @@ def init_db(conn: sqlite3.Connection) -> None:
             rain_probability REAL,
             precipitation_sum REAL,
             did_rain REAL,
-            uv_index REAL,
             wind_speed REAL,
             wind_gusts REAL,
             cloud_cover REAL,
@@ -129,7 +132,6 @@ def init_db(conn: sqlite3.Connection) -> None:
             precipitation_sum REAL,
             did_rain REAL,
             did_rain_probability REAL,
-            uv_index REAL,
             wind_speed REAL,
             wind_gusts REAL,
             cloud_cover REAL,
@@ -153,6 +155,14 @@ def init_db(conn: sqlite3.Connection) -> None:
     for col in ["cloud_cover", "humidity", "pressure_msl"]:
         _add_column_if_missing(conn, "ml_predictions", col, "REAL")
 
+    # uv_index was removed: forecast and actual sources turned out to measure
+    # different things (forecast-side values ran ~2-4x the observed ground
+    # truth, a systematic bias not noise - see the "why is the UV trend graph
+    # strange" investigation), making it meaningless to keep. Drop it from any
+    # database created by an earlier version.
+    for table in ["forecasts", "actuals", "ensemble_predictions", "ml_predictions"]:
+        _drop_column_if_present(conn, table, "uv_index")
+
     # Rows inserted before collection_method existed have no way to record how
     # they were collected. Recover it from the raw_json tag that
     # fetch_historical_forecasts stamps on backfilled rows; everything else was
@@ -173,7 +183,7 @@ def insert_forecasts(conn: sqlite3.Connection, records: Iterable[ForecastRecord]
         values = (
             r.source, r.location_name, r.lat, r.lon, r.forecast_date.isoformat(),
             r.collected_at.isoformat(timespec="seconds"), r.max_temp, r.min_temp,
-            r.rain_probability, r.precipitation_sum, r.uv_index, r.wind_speed,
+            r.rain_probability, r.precipitation_sum, r.wind_speed,
             r.wind_gusts, r.cloud_cover, r.humidity, r.pressure_msl, r.weather_code,
             json.dumps(r.raw_json or {}), r.collection_method,
         )
@@ -191,10 +201,10 @@ def upsert_actual(conn: sqlite3.Connection, r: ActualRecord) -> None:
         """
         INSERT INTO actuals (
             source, location_name, lat, lon, actual_date, collected_at,
-            max_temp, min_temp, precipitation_sum, did_rain, uv_index,
+            max_temp, min_temp, precipitation_sum, did_rain,
             wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl,
             weather_code, raw_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(source, location_name, actual_date)
         DO UPDATE SET
             collected_at=excluded.collected_at,
@@ -202,7 +212,6 @@ def upsert_actual(conn: sqlite3.Connection, r: ActualRecord) -> None:
             min_temp=excluded.min_temp,
             precipitation_sum=excluded.precipitation_sum,
             did_rain=excluded.did_rain,
-            uv_index=excluded.uv_index,
             wind_speed=excluded.wind_speed,
             wind_gusts=excluded.wind_gusts,
             cloud_cover=excluded.cloud_cover,
@@ -214,7 +223,7 @@ def upsert_actual(conn: sqlite3.Connection, r: ActualRecord) -> None:
         (
             r.source, r.location_name, r.lat, r.lon, r.actual_date.isoformat(),
             r.collected_at.isoformat(timespec="seconds"), r.max_temp, r.min_temp,
-            r.precipitation_sum, r.did_rain, r.uv_index, r.wind_speed, r.wind_gusts,
+            r.precipitation_sum, r.did_rain, r.wind_speed, r.wind_gusts,
             r.cloud_cover, r.humidity, r.pressure_msl, r.weather_code,
             json.dumps(r.raw_json or {}),
         ),

@@ -62,8 +62,6 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     else:
         precipitation_sum = amount_max if amount_max is not None else amount_min
 
-    uv = day.get("uv", {})
-
     return ForecastRecord(
         source="bom",
         location_name=location.name,
@@ -75,6 +73,5 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         min_temp=_to_float(day.get("temp_min")),
         rain_probability=_to_float(rain.get("chance")),
         precipitation_sum=precipitation_sum,
-        uv_index=_to_float(uv.get("max_index")),
         raw_json=payload,
     )

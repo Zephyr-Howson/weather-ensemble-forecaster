@@ -58,20 +58,29 @@ table below reflects what's actually wired into `sources/__init__.py` today.
 | `bom` | Australia's Bureau of Meteorology, via its unofficial public JSON API (`api.weather.bom.gov.au`) | Free, no key | No — reverse-engineered, not an officially documented integration. Its own responses carry a "must not use, copy or share" notice, so treat it as best-effort/personal use, not a production dependency. |
 
 **Every field a source can report:**
-`max_temp`, `min_temp`, `rain_probability`, `precipitation_sum`, `uv_index`,
+`max_temp`, `min_temp`, `rain_probability`, `precipitation_sum`,
 `wind_speed`, `wind_gusts`, `cloud_cover`, `humidity`, `pressure_msl`,
 `weather_code`. Not every source reports every field — gaps are left `NULL`
 rather than faked:
 
 - `wttr_in` has no reliable daily rain **total** (only a rain **chance**), so
   `precipitation_sum` is always `None`.
-- `openweathermap`'s free tier and `accuweather`'s base 5-day endpoint don't
-  expose UV index at all.
-- `accuweather` doesn't expose mean sea-level pressure either.
+- `accuweather` doesn't expose mean sea-level pressure.
 - `visual_crossing` reports conditions as text/icons, not WMO codes, so
   `weather_code` is always `None`.
 - `bom`'s daily forecast has no wind/humidity/cloud/pressure/weather-code
-  numerics at all — only rain chance/amount, UV index, and temp max/min.
+  numerics at all — only rain chance/amount and temp max/min.
+
+**UV index was tracked here once and removed.** Every forecast source's
+`uv_index` (including WeatherAPI's own forecast) ran systematically 2-4x
+higher than the observed ground truth across thousands of scored rows — not
+noise, a consistent one-directional bias (forecast APIs commonly report a
+clear-sky/theoretical-maximum UV index, while an observed value reflects
+actual cloud cover). Averaging several sources that share the same bias
+doesn't cancel it out, so the weighted blend scored *worse* than a naive
+persistence baseline — a sign the forecast and actual data were measuring
+different things, not that the models were bad. Removed rather than kept as
+a known-broken metric.
 
 **Configured but not currently active:** `open_meteo_icon_global` (DWD ICON
 Global) and `open_meteo_bom_access_global` (BOM ACCESS Global via Open-Meteo)
@@ -87,25 +96,21 @@ collects successfully.
   backbone actuals source, called by both `record_actual` (yesterday, every
   night) and `backfill` (a whole date range at once). Reports `max_temp`,
   `min_temp`, `precipitation_sum`, `did_rain` (derived from
-  `precipitation_sum >= RAIN_THRESHOLD_MM`, default 0.2mm), `uv_index`,
-  `wind_speed`, `wind_gusts`, `cloud_cover`, `humidity`, `pressure_msl`,
-  `weather_code`. One field is a structural gap, not a code bug: its
-  `uv_index_max` is always `null` (verified directly against the API) since
-  UV index isn't part of the ERA5 reanalysis the Archive API is built from —
-  see the WeatherAPI entry below for how that gap is filled.
+  `precipitation_sum >= RAIN_THRESHOLD_MM`, default 0.2mm), `wind_speed`,
+  `wind_gusts`, `cloud_cover`, `humidity`, `pressure_msl`, `weather_code`.
 - The `actuals` table/every downstream join assumes exactly one row per
-  (location, date) — see `load_modelling_table` — so two independent ground-
-  truth sources are blended in as **per-field overrides** onto the single
-  Open-Meteo-sourced row (`service._fetch_blended_actual`), rather than each
-  getting a row of their own (which would silently duplicate every forecast
+  (location, date) — see `load_modelling_table` — so an independent ground-
+  truth source is blended in as a **per-field override** onto the single
+  Open-Meteo-sourced row (`service._fetch_blended_actual`), rather than
+  getting a row of its own (which would silently duplicate every forecast
   row in that join). The row's `source` column deliberately stays
   `open_meteo_archive` regardless of which fields got overridden — changing
   it would insert a second row instead of updating the existing one,
   recreating the exact duplicate-row-per-day problem this blend exists to
-  avoid. Provenance (which fields each source actually overrode, if any) is
-  recorded in `raw_json["overridden_fields_by_source"]` instead. Any override
-  source being unreachable (missing key/email, an outage, no data for that
-  date) just leaves those fields as Open-Meteo's.
+  avoid. Provenance (which fields were actually overridden, if any) is
+  recorded in `raw_json["overridden_fields_by_source"]` instead. The override
+  source being unreachable (missing email, an outage, no data for that date)
+  just leaves those fields as Open-Meteo's.
   - **`silo`** (`sources/silo.py`) — Australia-only, government-run, gridded
     daily climate data built from BOM's own station network, going back to
     1889; a genuinely independent ground truth, not a repackaging of the same
@@ -113,15 +118,6 @@ collects successfully.
     usage tracking, not a formal API key) — leave it blank in `.env` to skip
     it. Only ever overrides `max_temp`/`min_temp`/`precipitation_sum`/
     `did_rain` (its DataDrill query is scoped to just rainfall/max/min temp).
-  - **`weatherapi`** (`sources/weatherapi.py`, `fetch_actual`) — only ever
-    overrides `uv_index`, specifically to fill the gap Open-Meteo's Archive
-    API leaves. Uses WeatherAPI's `history.json` endpoint (the same
-    `WEATHERAPI_KEY` used for forecasts) — unlike its forecast endpoint, this
-    genuinely returns past observations, so it's exactly what an actuals
-    source needs (it just isn't a substitute for backfilling *forecasts*,
-    which Open-Meteo still handles). Every other field it returns
-    (temperature, humidity, wind, etc.) is deliberately left unused here so
-    it doesn't quietly override a better-established actual.
 
 ### Reliability: retry with backoff
 
@@ -154,11 +150,13 @@ A separate Ridge Regression (continuous variables) or Logistic Regression
 location's full history of every source's forecast plus cross-source
 agreement features (mean/median/std/min/max/range/count across sources) and
 date features (month, day of year, day of week). Stored in
-`ml_predictions`. `precipitation_sum`, `wind_speed`, `wind_gusts`, `uv_index`,
+`ml_predictions`. `precipitation_sum`, `wind_speed`, `wind_gusts`,
 `cloud_cover`, `humidity`, and `pressure_msl` predictions are clipped at 0
 before being stored or scored (`ml.clip_prediction`) — Ridge has no
 non-negativity constraint and can otherwise predict a small negative value
-for a quantity that physically can't go below zero.
+for a quantity that physically can't go below zero. `cloud_cover` and
+`humidity` are also capped at 100 (percentages can't physically exceed it) —
+a missing-source data gap once let Ridge extrapolate a 467.9% prediction.
 
 ### Walk-forward backtest
 

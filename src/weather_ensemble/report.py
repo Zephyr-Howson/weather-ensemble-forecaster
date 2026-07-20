@@ -25,7 +25,6 @@ TARGET_LABELS = {
     "min_temp": "Min temperature",
     "precipitation_sum": "Precipitation",
     "did_rain": "Rain",
-    "uv_index": "UV index",
     "wind_speed": "Wind speed",
     "wind_gusts": "Wind gusts",
     "cloud_cover": "Cloud cover",

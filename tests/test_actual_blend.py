@@ -5,7 +5,7 @@ from datetime import date, datetime
 from weather_ensemble.config import Location
 from weather_ensemble.models import ActualRecord
 from weather_ensemble.service import _fetch_blended_actual
-from weather_ensemble.sources import open_meteo, silo, weatherapi
+from weather_ensemble.sources import open_meteo, silo
 
 LOCATION = Location(name="Melbourne", lat=-37.8, lon=144.9)
 TARGET_DATE = date(2026, 6, 19)
@@ -23,7 +23,6 @@ def _base_record(**overrides) -> ActualRecord:
         min_temp=10.0,
         precipitation_sum=0.0,
         did_rain=0,
-        uv_index=4.0,
         wind_speed=15.0,
         wind_gusts=25.0,
         cloud_cover=40.0,
@@ -48,25 +47,6 @@ def _silo_record(**overrides) -> ActualRecord:
     return ActualRecord(**fields)
 
 
-def _weatherapi_record(**overrides) -> ActualRecord:
-    fields = dict(
-        source="weatherapi",
-        location_name=LOCATION.name,
-        lat=LOCATION.lat,
-        lon=LOCATION.lon,
-        actual_date=TARGET_DATE,
-        collected_at=datetime(2026, 6, 20, 9, 0),
-    )
-    fields.update(overrides)
-    return ActualRecord(**fields)
-
-
-def _no_op_weatherapi(monkeypatch):
-    """WeatherAPI reachable but with nothing to override, so tests that only care
-    about SILO don't need to separately reason about the UV override too."""
-    monkeypatch.setattr(weatherapi, "fetch_actual", lambda location, target_date: _weatherapi_record())
-
-
 def _no_op_silo(monkeypatch):
     monkeypatch.setattr(silo, "fetch_actual", lambda location, target_date: _silo_record())
 
@@ -80,7 +60,6 @@ def test_silo_overrides_only_its_own_fields(monkeypatch):
             max_temp=21.5, min_temp=11.5, precipitation_sum=5.0, did_rain=1, raw_json={"silo": True}
         ),
     )
-    _no_op_weatherapi(monkeypatch)
 
     result = _fetch_blended_actual(LOCATION, TARGET_DATE)
 
@@ -90,7 +69,6 @@ def test_silo_overrides_only_its_own_fields(monkeypatch):
     assert result.precipitation_sum == 5.0
     assert result.did_rain == 1
     # ...but everything SILO doesn't cover stays Open-Meteo's.
-    assert result.uv_index == 4.0
     assert result.wind_speed == 15.0
     assert result.cloud_cover == 40.0
     assert result.humidity == 60.0
@@ -107,62 +85,7 @@ def test_silo_overrides_only_its_own_fields(monkeypatch):
     ]
 
 
-def test_weatherapi_overrides_only_uv_index(monkeypatch):
-    monkeypatch.setattr(open_meteo, "fetch_actual", lambda location, target_date: _base_record())
-    _no_op_silo(monkeypatch)
-    monkeypatch.setattr(
-        weatherapi,
-        "fetch_actual",
-        lambda location, target_date: _weatherapi_record(uv_index=6.5, raw_json={"weatherapi": True}),
-    )
-
-    result = _fetch_blended_actual(LOCATION, TARGET_DATE)
-
-    # WeatherAPI's observed UV wins...
-    assert result.uv_index == 6.5
-    # ...but everything else (including SILO's own fields) stays untouched.
-    assert result.max_temp == 20.0
-    assert result.min_temp == 10.0
-    assert result.precipitation_sum == 0.0
-    assert result.did_rain == 0
-    assert result.source == "open_meteo_archive"
-    assert result.raw_json["overridden_fields_by_source"]["weatherapi"] == ["uv_index"]
-    assert "silo" not in result.raw_json["overridden_fields_by_source"]
-
-
-def test_silo_and_weatherapi_overrides_combine(monkeypatch):
-    monkeypatch.setattr(open_meteo, "fetch_actual", lambda location, target_date: _base_record())
-    monkeypatch.setattr(
-        silo,
-        "fetch_actual",
-        lambda location, target_date: _silo_record(max_temp=21.5, min_temp=11.5, precipitation_sum=5.0, did_rain=1),
-    )
-    monkeypatch.setattr(weatherapi, "fetch_actual", lambda location, target_date: _weatherapi_record(uv_index=6.5))
-
-    result = _fetch_blended_actual(LOCATION, TARGET_DATE)
-
-    assert result.max_temp == 21.5
-    assert result.uv_index == 6.5
-    assert set(result.raw_json["overridden_fields_by_source"]) == {"silo", "weatherapi"}
-
-
-def test_weatherapi_failure_does_not_affect_silo_override(monkeypatch):
-    monkeypatch.setattr(open_meteo, "fetch_actual", lambda location, target_date: _base_record())
-    monkeypatch.setattr(silo, "fetch_actual", lambda location, target_date: _silo_record(max_temp=21.5))
-    monkeypatch.setattr(
-        weatherapi,
-        "fetch_actual",
-        lambda location, target_date: (_ for _ in ()).throw(RuntimeError("WEATHERAPI_KEY is not set.")),
-    )
-
-    result = _fetch_blended_actual(LOCATION, TARGET_DATE)
-
-    assert result.max_temp == 21.5
-    assert result.uv_index == 4.0  # Open-Meteo's, since WeatherAPI failed
-    assert "weatherapi" not in result.raw_json["overridden_fields_by_source"]
-
-
-def test_all_override_sources_failing_falls_back_to_pure_open_meteo(monkeypatch):
+def test_silo_failure_falls_back_to_pure_open_meteo(monkeypatch):
     base = _base_record()
     monkeypatch.setattr(open_meteo, "fetch_actual", lambda location, target_date: base)
     monkeypatch.setattr(
@@ -170,22 +93,16 @@ def test_all_override_sources_failing_falls_back_to_pure_open_meteo(monkeypatch)
         "fetch_actual",
         lambda location, target_date: (_ for _ in ()).throw(RuntimeError("SILO_EMAIL is not set.")),
     )
-    monkeypatch.setattr(
-        weatherapi,
-        "fetch_actual",
-        lambda location, target_date: (_ for _ in ()).throw(RuntimeError("WEATHERAPI_KEY is not set.")),
-    )
 
     result = _fetch_blended_actual(LOCATION, TARGET_DATE)
 
     assert result is base
 
 
-def test_override_sources_with_no_data_for_date_fall_back_to_pure_open_meteo(monkeypatch):
+def test_silo_with_no_data_for_date_falls_back_to_pure_open_meteo(monkeypatch):
     base = _base_record()
     monkeypatch.setattr(open_meteo, "fetch_actual", lambda location, target_date: base)
     _no_op_silo(monkeypatch)
-    _no_op_weatherapi(monkeypatch)
 
     result = _fetch_blended_actual(LOCATION, TARGET_DATE)
 

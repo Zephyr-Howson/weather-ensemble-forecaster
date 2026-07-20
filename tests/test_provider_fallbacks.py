@@ -128,7 +128,6 @@ def test_openweathermap_aggregates_3hourly_into_daily(monkeypatch):
     assert record.precipitation_sum == 1.5
     assert record.cloud_cover == 20  # mean of 0 and 40
     assert record.humidity == 25  # mean of 0 and 50 (the 99 from the other day excluded)
-    assert record.uv_index is None
 
 
 def test_weatherbit_converts_wind_to_kmh_and_prefers_slp(monkeypatch):
@@ -272,4 +271,3 @@ def test_bom_maps_daily_forecast_and_preserves_zero_values(monkeypatch):
     assert record.forecast_date.isoformat() == "2026-07-16"
     assert record.rain_probability == 0
     assert record.precipitation_sum == 0
-    assert record.uv_index == 0

@@ -19,7 +19,7 @@ from weather_ensemble.config import (
     local_today,
 )
 from weather_ensemble.models import ActualRecord, ForecastRecord
-from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo, silo, weatherapi
+from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo, silo
 
 # requests' HTTPError messages embed the full request URL, and most providers here
 # put their API key in the query string - so printing an exception verbatim can leak
@@ -40,14 +40,9 @@ def _safe_error(exc: Exception) -> str:
 #
 # Open-Meteo's Archive API is the base actual for everything else. SILO only
 # ever supplies rainfall/max/min temp (its DataDrill request is scoped to
-# those - see sources/silo.py). WeatherAPI's history endpoint is only trusted
-# for uv_index: Open-Meteo's archive never computes UV at all (uv_index_max is
-# always null - not part of the ERA5 reanalysis it's built from) and SILO
-# doesn't cover it either, but WeatherAPI's history.json does report an
-# observed uv value - see sources/weatherapi.py.
+# those - see sources/silo.py).
 _ACTUAL_OVERRIDE_SOURCES = [
     ("silo", silo, ["max_temp", "min_temp", "precipitation_sum", "did_rain"]),
-    ("weatherapi", weatherapi, ["uv_index"]),
 ]
 
 
@@ -213,7 +208,6 @@ def compute_mae_scores(df: pd.DataFrame) -> dict[str, dict[str, float]]:
         "max_temp": "actual_max_temp",
         "min_temp": "actual_min_temp",
         "precipitation_sum": "actual_precipitation_sum",
-        "uv_index": "actual_uv_index",
         "wind_speed": "actual_wind_speed",
         "wind_gusts": "actual_wind_gusts",
         "cloud_cover": "actual_cloud_cover",
@@ -267,7 +261,7 @@ def blend_weighted(forecast_df: pd.DataFrame, scores: dict[str, dict[str, float]
 
     # Weighted baseline is still useful for directly comparable continuous vars.
     blendable = [
-        "max_temp", "min_temp", "precipitation_sum", "uv_index", "wind_speed", "wind_gusts",
+        "max_temp", "min_temp", "precipitation_sum", "wind_speed", "wind_gusts",
         "cloud_cover", "humidity", "pressure_msl",
     ]
     for var in blendable:
@@ -328,14 +322,14 @@ def blend_forecast(db_path: Path, location: Location, window_days: int, target_d
             INSERT OR IGNORE INTO ensemble_predictions (
                 location_name, lat, lon, forecast_date, generated_at, window_days,
                 max_temp, min_temp, rain_probability, precipitation_sum, did_rain,
-                uv_index, wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 location.name, location.lat, location.lon, target_date.isoformat(),
                 datetime.now().isoformat(timespec="seconds"), window_days,
                 blended.get("max_temp"), blended.get("min_temp"), blended.get("rain_probability"),
-                blended.get("precipitation_sum"), blended.get("did_rain"), blended.get("uv_index"),
+                blended.get("precipitation_sum"), blended.get("did_rain"),
                 blended.get("wind_speed"), blended.get("wind_gusts"), blended.get("cloud_cover"),
                 blended.get("humidity"), blended.get("pressure_msl"), json.dumps(metadata),
             ),

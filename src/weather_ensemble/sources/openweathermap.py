@@ -103,7 +103,6 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         min_temp=_min([_to_float(m.get("temp_min")) for m in main]),
         rain_probability=round(rain_prob * 100, 1) if rain_prob is not None else None,
         precipitation_sum=round(sum(rains), 3),
-        uv_index=None,  # Not exposed by the free 3-hourly forecast endpoint.
         wind_speed=_kmh(_max([_to_float(w.get("speed")) for w in wind])),
         wind_gusts=_kmh(_max([_to_float(w.get("gust")) for w in wind])),
         cloud_cover=_mean([_to_float(c.get("all")) for c in clouds]),

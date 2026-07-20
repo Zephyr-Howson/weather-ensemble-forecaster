@@ -52,7 +52,6 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         min_temp=_to_float(day.get("mintempC")),
         rain_probability=_max_hourly(hourly, "chanceofrain"),
         precipitation_sum=None,  # wttr JSON lacks reliable daily rain total
-        uv_index=_max_hourly(hourly, "uvIndex"),
         wind_speed=_max_hourly(hourly, "windspeedKmph"),
         wind_gusts=_max_hourly(hourly, "WindGustKmph"),
         cloud_cover=_mean_hourly(hourly, "cloudcover"),

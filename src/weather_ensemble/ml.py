@@ -36,7 +36,7 @@ FEATURE_TARGET_OVERRIDE = {"did_rain": "precipitation_sum"}
 # and its actually-served prediction agree, and neither is inflated by an
 # impossible negative value.
 NON_NEGATIVE_TARGETS = {
-    "precipitation_sum", "wind_speed", "wind_gusts", "uv_index",
+    "precipitation_sum", "wind_speed", "wind_gusts",
     "cloud_cover", "humidity", "pressure_msl",
 }
 
@@ -344,14 +344,14 @@ def predict_latest_ml(db_path: Path, location: Location, model_dir: Path, target
             INSERT OR IGNORE INTO ml_predictions (
                 location_name, lat, lon, forecast_date, generated_at, model_version,
                 max_temp, min_temp, precipitation_sum, did_rain, did_rain_probability,
-                uv_index, wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 location.name, location.lat, location.lon, forecast_date, generated_at, MODEL_VERSION,
                 predictions.get("max_temp"), predictions.get("min_temp"), predictions.get("precipitation_sum"),
                 predictions.get("did_rain"), predictions.get("did_rain_probability"),
-                predictions.get("uv_index"), predictions.get("wind_speed"), predictions.get("wind_gusts"),
+                predictions.get("wind_speed"), predictions.get("wind_gusts"),
                 predictions.get("cloud_cover"), predictions.get("humidity"), predictions.get("pressure_msl"),
                 json.dumps(metadata),
             ),
