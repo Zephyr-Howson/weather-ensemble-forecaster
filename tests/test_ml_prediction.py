@@ -8,7 +8,7 @@ from sklearn.dummy import DummyRegressor
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 
-from weather_ensemble.config import Location
+from weather_ensemble.config import Location, local_today
 from weather_ensemble.db import connect, insert_forecasts, upsert_actual
 from weather_ensemble.ml import (
     TrainedModelBundle,
@@ -46,7 +46,7 @@ def _forecast_record(source: str, forecast_date: date, collected_at: datetime, v
 def test_build_prediction_feature_table_uses_tomorrow_forecasts(tmp_path):
     db_path = tmp_path / "weather.db"
     location = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
-    tomorrow = date.today() + timedelta(days=1)
+    tomorrow = local_today(location) + timedelta(days=1)
 
     with connect(db_path) as conn:
         insert_forecasts(
@@ -70,7 +70,7 @@ def test_build_prediction_feature_table_honors_explicit_target_date(tmp_path):
     dropped by a database reset) rather than always defaulting to tomorrow."""
     db_path = tmp_path / "weather.db"
     location = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
-    tomorrow = date.today() + timedelta(days=1)
+    tomorrow = local_today(location) + timedelta(days=1)
     a_past_date = date(2026, 6, 1)
 
     with connect(db_path) as conn:
@@ -162,7 +162,7 @@ def test_predict_latest_ml_uses_live_forecast_rows(tmp_path):
     model_dir = tmp_path / "models"
     model_dir.mkdir()
     location = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
-    tomorrow = date.today() + timedelta(days=1)
+    tomorrow = local_today(location) + timedelta(days=1)
 
     with connect(db_path) as conn:
         insert_forecasts(
@@ -257,7 +257,7 @@ def test_predict_latest_ml_clips_negative_precipitation_to_zero(tmp_path):
     model_dir = tmp_path / "models"
     model_dir.mkdir()
     location = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
-    tomorrow = date.today() + timedelta(days=1)
+    tomorrow = local_today(location) + timedelta(days=1)
 
     with connect(db_path) as conn:
         insert_forecasts(
