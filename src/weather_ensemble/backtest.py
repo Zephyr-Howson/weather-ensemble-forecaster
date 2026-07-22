@@ -71,7 +71,7 @@ def _backtest_ensemble(
             location_name, lat, lon, forecast_date, generated_at, window_days,
             max_temp, min_temp, rain_probability, precipitation_sum, did_rain,
             wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl, metadata_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             location.name, location.lat, location.lon, d_iso, _generated_at_for(target_date), window_days,

@@ -93,31 +93,24 @@ collects successfully.
 ### Actuals (the ground truth)
 
 - **`open_meteo_archive`** (via Open-Meteo's Historical Weather API) is the
-  backbone actuals source, called by both `record_actual` (yesterday, every
-  night) and `backfill` (a whole date range at once). Reports `max_temp`,
-  `min_temp`, `precipitation_sum`, `did_rain` (derived from
-  `precipitation_sum >= RAIN_THRESHOLD_MM`, default 0.2mm), `wind_speed`,
-  `wind_gusts`, `cloud_cover`, `humidity`, `pressure_msl`, `weather_code`.
-- The `actuals` table/every downstream join assumes exactly one row per
-  (location, date) — see `load_modelling_table` — so an independent ground-
-  truth source is blended in as a **per-field override** onto the single
-  Open-Meteo-sourced row (`service._fetch_blended_actual`), rather than
-  getting a row of its own (which would silently duplicate every forecast
-  row in that join). The row's `source` column deliberately stays
-  `open_meteo_archive` regardless of which fields got overridden — changing
-  it would insert a second row instead of updating the existing one,
-  recreating the exact duplicate-row-per-day problem this blend exists to
-  avoid. Provenance (which fields were actually overridden, if any) is
-  recorded in `raw_json["overridden_fields_by_source"]` instead. The override
-  source being unreachable (missing email, an outage, no data for that date)
-  just leaves those fields as Open-Meteo's.
-  - **`silo`** (`sources/silo.py`) — Australia-only, government-run, gridded
-    daily climate data built from BOM's own station network, going back to
-    1889; a genuinely independent ground truth, not a repackaging of the same
-    reanalysis Open-Meteo uses. Needs only `SILO_EMAIL` (an email address for
-    usage tracking, not a formal API key) — leave it blank in `.env` to skip
-    it. Only ever overrides `max_temp`/`min_temp`/`precipitation_sum`/
-    `did_rain` (its DataDrill query is scoped to just rainfall/max/min temp).
+  default and only actively-used actuals source, called by both
+  `record_actual` (yesterday, every night) and `backfill` (a whole date range
+  at once). Reports `max_temp`, `min_temp`, `precipitation_sum`, `did_rain`
+  (derived from `precipitation_sum >= RAIN_THRESHOLD_MM`, default 0.2mm),
+  `wind_speed`, `wind_gusts`, `cloud_cover`, `humidity`, `pressure_msl`,
+  `weather_code`.
+- **`silo`** (`sources/silo.py`) — Australia-only, government-run, gridded
+  daily climate data built from BOM's own station network, going back to
+  1889; a genuinely independent ground truth, not a repackaging of the same
+  reanalysis Open-Meteo uses. Needs only `SILO_EMAIL` (an email address for
+  usage tracking, not a formal API key). **Not wired into the automated
+  pipeline** — the `actuals` table technically allows more than one source
+  per day, but `load_modelling_table`'s forecast-to-actual join assumes
+  exactly one actuals row per (location, date); adding a second source there
+  would silently duplicate every forecast row in the join. This project tried
+  blending SILO in as a per-field override for a while and reverted it -
+  Open-Meteo's own actuals proved more reliable here. Call `silo.fetch_actual`
+  directly if you want to compare against it or switch to it deliberately.
 
 ### Reliability: retry with backoff
 

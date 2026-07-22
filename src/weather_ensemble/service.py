@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import replace
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -18,8 +17,8 @@ from weather_ensemble.config import (
     TARGETS,
     local_today,
 )
-from weather_ensemble.models import ActualRecord, ForecastRecord
-from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo, silo
+from weather_ensemble.models import ForecastRecord
+from weather_ensemble.sources import FORECAST_SOURCES, OPEN_METEO_FORECAST_SOURCES, open_meteo
 
 # requests' HTTPError messages embed the full request URL, and most providers here
 # put their API key in the query string - so printing an exception verbatim can leak
@@ -29,65 +28,6 @@ _QUERY_STRING = re.compile(r"\?\S*")
 
 def _safe_error(exc: Exception) -> str:
     return _QUERY_STRING.sub("?<redacted>", str(exc))
-
-
-# Each entry is (label, module, fields it's trusted to override). The module
-# (not a bound reference to module.fetch_actual) is stored deliberately, so
-# `module.fetch_actual` is looked up fresh on every call below - tests (and
-# anything else) that monkeypatch a source module's fetch_actual would
-# otherwise have no effect, since a reference captured here at import time
-# would keep pointing at the original function forever.
-#
-# Open-Meteo's Archive API is the base actual for everything else. SILO only
-# ever supplies rainfall/max/min temp (its DataDrill request is scoped to
-# those - see sources/silo.py).
-_ACTUAL_OVERRIDE_SOURCES = [
-    ("silo", silo, ["max_temp", "min_temp", "precipitation_sum", "did_rain"]),
-]
-
-
-def _fetch_blended_actual(location: Location, target_date: date) -> ActualRecord:
-    """Open-Meteo actual, with independent ground-truth sources substituted in
-    field-by-field wherever they have data - see _ACTUAL_OVERRIDE_SOURCES.
-
-    The actuals table/every downstream join assumes exactly one actuals row per
-    (location, date) - see load_modelling_table. So rather than inserting each
-    extra source as its own row (which would silently duplicate every forecast
-    row in that join), this blends each one's values into the single
-    Open-Meteo-sourced row it still is field-for-field. Any override source
-    being unreachable (missing API key, an outage, a date it has no data for)
-    just leaves those fields as Open-Meteo's rather than failing the whole call.
-    """
-    base = open_meteo.fetch_actual(location, target_date)
-
-    overrides: dict[str, Any] = {}
-    raw_json: dict[str, Any] = {"open_meteo": base.raw_json}
-    provenance: dict[str, list[str]] = {}
-
-    for label, module, fields in _ACTUAL_OVERRIDE_SOURCES:
-        try:
-            override_actual = module.fetch_actual(location, target_date)
-        except Exception as exc:
-            print(f"WARN: {label} actual failed for {location.name} {target_date}: {_safe_error(exc)}")
-            continue
-
-        found = {f: getattr(override_actual, f) for f in fields if getattr(override_actual, f) is not None}
-        if not found:
-            continue
-        overrides.update(found)
-        raw_json[label] = override_actual.raw_json
-        provenance[label] = sorted(found)
-
-    if not overrides:
-        return base
-    # `source` deliberately stays "open_meteo" (not e.g. "open_meteo+silo"):
-    # db.upsert_actual's ON CONFLICT key is (source, location_name, actual_date),
-    # so changing it here would insert a second row instead of updating the
-    # existing one - silently recreating the exact duplicate-row-per-day bug
-    # this whole blend exists to avoid. Provenance is recorded in raw_json instead.
-    raw_json["overridden_fields_by_source"] = provenance
-    overrides["raw_json"] = raw_json
-    return replace(base, **overrides)
 
 
 def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]:
@@ -124,7 +64,7 @@ def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastR
 def record_actual(db_path: Path, location: Location, target_date: date | None = None) -> None:
     if target_date is None:
         target_date = local_today(location) - timedelta(days=1)
-    actual = _fetch_blended_actual(location, target_date)
+    actual = open_meteo.fetch_actual(location, target_date)
     with db.connect(db_path) as conn:
         db.upsert_actual(conn, actual)
 
@@ -135,14 +75,12 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
     Open-Meteo is intentionally the backbone here because its Historical
     Forecast API lets us retrieve archived forecasts rather than just observed
     weather. Optional providers are live-only and are not backfilled here.
-    Actuals still get SILO's rainfall/max/min temp blended in - see
-    _fetch_blended_actual - since SILO's DataDrill archive goes back to 1889.
     """
     today = local_today(location)
     with db.connect(db_path) as conn:
         for i in range(1, days_back + 1):
             try:
-                actual = _fetch_blended_actual(location, today - timedelta(days=i))
+                actual = open_meteo.fetch_actual(location, today - timedelta(days=i))
                 db.upsert_actual(conn, actual)
             except Exception as exc:
                 print(f"WARN: actual backfill failed for day -{i}: {_safe_error(exc)}")
