@@ -8,7 +8,12 @@ on:
 
 concurrency:
   group: daily-weather-collection
-  cancel-in-progress: false
+  # true (not false): each day's run is independent and self-contained - if a
+  # previous run ever hangs or gets stuck queued (a real incident: the
+  # scheduled trigger silently stopped firing for two days after one run was
+  # cancelled), a stale run should always yield to a fresh one rather than
+  # blocking it. There's nothing in a half-finished run worth preserving.
+  cancel-in-progress: true
 
 permissions:
   contents: write
