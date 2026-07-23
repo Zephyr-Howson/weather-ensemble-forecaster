@@ -311,7 +311,14 @@ def main() -> None:
 
     if args.accuracy_report:
         locations = AUSTRALIAN_LOCATIONS if args.all_locations else [_location_from_args(args)]
-        long_df = build_predictions_long(args.db, locations)
+        # build_html_report only ever uses the most recent report_history_days
+        # anyway (everything older gets trimmed immediately) - +report_window
+        # is a small buffer so the centered rolling-MAE trend has full context
+        # right at the edge of that window too, matching what an unbounded
+        # read would have produced for every visible date.
+        long_df = build_predictions_long(
+            args.db, locations, window_days=args.report_history_days + args.report_window
+        )
         output = build_html_report(
             long_df,
             args.accuracy_report,

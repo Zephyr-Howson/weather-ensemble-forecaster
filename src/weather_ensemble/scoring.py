@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from datetime import timedelta
+
 from weather_ensemble import db
-from weather_ensemble.config import RAIN_THRESHOLD_MM, TARGETS, Location
+from weather_ensemble.config import RAIN_THRESHOLD_MM, TARGETS, Location, local_today
 from weather_ensemble.service import load_modelling_table
 
 BASELINE_PERSISTENCE = "baseline_persistence"
@@ -63,14 +65,15 @@ def _long_rows_from_wide(
     return rows
 
 
-def _source_predictions(db_path: Path, location: Location) -> list[dict]:
-    wide = load_modelling_table(db_path, location)
+def _source_predictions(db_path: Path, location: Location, window_days: int | None = None) -> list[dict]:
+    wide = load_modelling_table(db_path, location, window_days=window_days)
     if wide.empty:
         return []
     return _long_rows_from_wide(wide, model_col="source", date_col="forecast_date")
 
 
-def _ensemble_predictions(db_path: Path, location: Location) -> list[dict]:
+def _ensemble_predictions(db_path: Path, location: Location, window_days: int | None = None) -> list[dict]:
+    cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
     with db.connect(db_path) as conn:
         wide = pd.read_sql_query(
             """
@@ -79,7 +82,7 @@ def _ensemble_predictions(db_path: Path, location: Location) -> list[dict]:
                     PARTITION BY location_name, forecast_date ORDER BY generated_at DESC
                 ) AS rn
                 FROM ensemble_predictions
-                WHERE location_name = ?
+                WHERE location_name = ? AND forecast_date >= ?
             )
             SELECT e.location_name, e.forecast_date, e.max_temp, e.min_temp,
                    e.precipitation_sum, e.did_rain, e.wind_speed, e.wind_gusts,
@@ -94,14 +97,15 @@ def _ensemble_predictions(db_path: Path, location: Location) -> list[dict]:
             WHERE e.rn = 1
             """,
             conn,
-            params=(location.name,),
+            params=(location.name, cutoff),
         )
     if wide.empty:
         return []
     return _long_rows_from_wide(wide, model_col="", date_col="forecast_date", source_prefix=MODEL_ENSEMBLE)
 
 
-def _ml_predictions(db_path: Path, location: Location) -> list[dict]:
+def _ml_predictions(db_path: Path, location: Location, window_days: int | None = None) -> list[dict]:
+    cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
     with db.connect(db_path) as conn:
         wide = pd.read_sql_query(
             """
@@ -110,7 +114,7 @@ def _ml_predictions(db_path: Path, location: Location) -> list[dict]:
                     PARTITION BY location_name, forecast_date ORDER BY generated_at DESC
                 ) AS rn
                 FROM ml_predictions
-                WHERE location_name = ?
+                WHERE location_name = ? AND forecast_date >= ?
             )
             SELECT m.location_name, m.forecast_date, m.max_temp, m.min_temp,
                    m.precipitation_sum, m.did_rain, m.wind_speed, m.wind_gusts,
@@ -125,7 +129,7 @@ def _ml_predictions(db_path: Path, location: Location) -> list[dict]:
             WHERE m.rn = 1
             """,
             conn,
-            params=(location.name,),
+            params=(location.name, cutoff),
         )
     if wide.empty:
         return []
@@ -133,7 +137,11 @@ def _ml_predictions(db_path: Path, location: Location) -> list[dict]:
 
 
 def _baseline_predictions(
-    db_path: Path, location: Location, climatology_window: int = 30, climatology_min_periods: int = 7
+    db_path: Path,
+    location: Location,
+    climatology_window: int = 30,
+    climatology_min_periods: int = 7,
+    window_days: int | None = None,
 ) -> list[dict]:
     """Persistence ("tomorrow = today") and trailing-average climatology baselines.
 
@@ -143,15 +151,30 @@ def _baseline_predictions(
     climatology uses a trailing rolling mean rather than a true day-of-year
     seasonal average; once a year-plus of actuals accumulate, this window can
     be swapped for a same-day-of-year lookup.
+
+    `window_days` (see build_predictions_long) is extended by `climatology_window`
+    extra days of actuals when *fetching* - the rolling climatology mean for
+    the very first visible date still needs its own trailing lookback, so
+    fetching only `window_days` back would quietly shrink/degrade its rolling
+    average for dates right at the edge of the window versus the unbounded
+    read it replaces. Those extra older rows exist purely to feed that rolling
+    calculation, though - they're trimmed back off below so the *output* still
+    only covers `window_days`, exactly like every other prediction source.
     """
+    visible_cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else None
+    fetch_cutoff = (
+        (local_today(location) - timedelta(days=window_days + climatology_window)).isoformat()
+        if window_days
+        else "0000-01-01"
+    )
     with db.connect(db_path) as conn:
         actuals = pd.read_sql_query(
             "SELECT location_name, actual_date, max_temp, min_temp, precipitation_sum, "
             "did_rain, wind_speed, wind_gusts, cloud_cover, humidity, pressure_msl "
             "FROM actuals "
-            "WHERE location_name = ? ORDER BY actual_date",
+            "WHERE location_name = ? AND actual_date >= ? ORDER BY actual_date",
             conn,
-            params=(location.name,),
+            params=(location.name, fetch_cutoff),
         )
     if actuals.empty:
         return []
@@ -169,11 +192,14 @@ def _baseline_predictions(
                 actual = series.iloc[idx]
                 if pd.isna(predicted) or pd.isna(actual):
                     continue
+                forecast_date = actuals["actual_date"].iloc[idx]
+                if visible_cutoff is not None and forecast_date < visible_cutoff:
+                    continue
                 rows.append(
                     {
                         "model": model,
                         "location_name": location.name,
-                        "forecast_date": actuals["actual_date"].iloc[idx],
+                        "forecast_date": forecast_date,
                         "target": target,
                         "predicted": float(predicted),
                         "actual": float(actual),
@@ -182,19 +208,27 @@ def _baseline_predictions(
     return rows
 
 
-def build_predictions_long(db_path: Path, locations: list[Location]) -> pd.DataFrame:
+def build_predictions_long(db_path: Path, locations: list[Location], window_days: int | None = None) -> pd.DataFrame:
     """One row per (model, location, date, target) with a predicted/actual pair.
 
     `model` ranges over every raw forecast source, plus 'ensemble', 'ml', and the
     two baselines. This is the single table every rollup (rolling accuracy over
     time, leaderboards) in this module is built from.
+
+    `window_days` bounds every underlying query to recent history instead of
+    scanning every row ever collected - a real incident: with no bound here,
+    report generation re-read and re-melted the *entire* history of every
+    table on every run, so its cost grew a little more every single day even
+    though `build_html_report` immediately discards everything older than its
+    own `history_days` right after. Left as None (unbounded) for callers that
+    genuinely need full history (e.g. the notebooks).
     """
     rows: list[dict] = []
     for location in locations:
-        rows.extend(_source_predictions(db_path, location))
-        rows.extend(_ensemble_predictions(db_path, location))
-        rows.extend(_ml_predictions(db_path, location))
-        rows.extend(_baseline_predictions(db_path, location))
+        rows.extend(_source_predictions(db_path, location, window_days=window_days))
+        rows.extend(_ensemble_predictions(db_path, location, window_days=window_days))
+        rows.extend(_ml_predictions(db_path, location, window_days=window_days))
+        rows.extend(_baseline_predictions(db_path, location, window_days=window_days))
 
     df = pd.DataFrame(rows)
     if df.empty:

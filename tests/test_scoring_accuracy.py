@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
-from weather_ensemble.config import Location
+from weather_ensemble.config import Location, local_today
 from weather_ensemble.db import connect, insert_forecasts, upsert_actual
 from weather_ensemble.models import ActualRecord, ForecastRecord
 from weather_ensemble.report import build_html_report
@@ -56,8 +56,9 @@ def _actual(actual_date: date, max_temp: float, precipitation_sum: float = 0.0) 
     )
 
 
-def _seed_db(db_path, num_days: int = 10) -> date:
-    start = date(2026, 1, 1)
+def _seed_db(db_path, num_days: int = 10, start: date | None = None) -> date:
+    if start is None:
+        start = date(2026, 1, 1)
     with connect(db_path) as conn:
         for i in range(num_days):
             day = start + timedelta(days=i)
@@ -163,3 +164,33 @@ def test_build_html_report_writes_file(tmp_path):
 def test_build_html_report_handles_empty_input(tmp_path):
     output = build_html_report(pd.DataFrame(), tmp_path / "empty.html", tmp_path / "empty.db")
     assert output.exists()
+
+
+def test_build_predictions_long_window_days_matches_unbounded_within_window(tmp_path):
+    """window_days bounds the underlying reads to recent history - a real fix,
+    since without it report generation re-scanned every row ever collected on
+    every run and got slower every single day (see build_predictions_long's
+    docstring). The bound must only drop old rows, never change the value of
+    a row it keeps - verified here by comparing every row still inside the
+    window against what an unbounded read produces for that same row.
+    """
+    db_path = tmp_path / "weather.db"
+    today = local_today(LOCATION)
+    start = today - timedelta(days=59)
+    _seed_db(db_path, num_days=60, start=start)
+
+    unbounded = build_predictions_long(db_path, [LOCATION])
+    windowed = build_predictions_long(db_path, [LOCATION], window_days=20)
+
+    cutoff = pd.Timestamp(today - timedelta(days=20))
+    assert (windowed["forecast_date"] >= cutoff).all()
+    assert (unbounded["forecast_date"] < cutoff).any()  # sanity: unbounded really does hold older rows too
+
+    key_cols = ["model", "location_name", "forecast_date", "target"]
+    in_window_unbounded = unbounded[unbounded["forecast_date"] >= cutoff]
+    merged = in_window_unbounded.merge(
+        windowed, on=key_cols, suffixes=("_unbounded", "_windowed"), how="outer", indicator=True
+    )
+    assert (merged["_merge"] == "both").all(), "windowed and unbounded disagree on which rows exist inside the window"
+    assert (merged["predicted_unbounded"] == merged["predicted_windowed"]).all()
+    assert (merged["actual_unbounded"] == merged["actual_windowed"]).all()
