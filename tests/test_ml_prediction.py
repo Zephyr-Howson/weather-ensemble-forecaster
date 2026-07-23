@@ -6,6 +6,7 @@ import pickle
 import pandas as pd
 from sklearn.dummy import DummyRegressor
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import Ridge
 from sklearn.pipeline import Pipeline
 
 from weather_ensemble.config import Location, local_today
@@ -13,6 +14,7 @@ from weather_ensemble.db import connect, insert_forecasts, upsert_actual
 from weather_ensemble.ml import (
     TrainedModelBundle,
     _fill_missing_sources_from_row_median,
+    _make_model,
     build_feature_table,
     build_prediction_feature_table,
     clip_prediction,
@@ -247,9 +249,18 @@ def test_clip_prediction_caps_percentage_targets_at_100():
     assert clip_prediction("cloud_cover", 50.0) == 50.0  # in-range values pass through
 
 
-def test_clip_prediction_does_not_cap_non_percentage_targets():
+def test_clip_prediction_does_not_cap_targets_with_no_ceiling():
     assert clip_prediction("wind_gusts", 150.0) == 150.0
-    assert clip_prediction("precipitation_sum", 200.0) == 200.0
+
+
+def test_clip_prediction_caps_precipitation_at_500mm():
+    """A real incident: a handful of high-leverage heavy-rain training days let
+    raw-scale Ridge extrapolate to an 11,751mm prediction on real production
+    data - far beyond Australia's official 24h rainfall record (~907mm,
+    Crohamhurst 1893). 500mm is a physically-motivated ceiling, not a
+    percentage one."""
+    assert clip_prediction("precipitation_sum", 11751.67) == 500.0
+    assert clip_prediction("precipitation_sum", 200.0) == 200.0  # in-range values pass through
 
 
 def test_predict_latest_ml_clips_negative_precipitation_to_zero(tmp_path):
@@ -297,3 +308,21 @@ def test_predict_latest_ml_clips_negative_precipitation_to_zero(tmp_path):
     result = predict_latest_ml(db_path, location, model_dir)
 
     assert result["predictions"]["precipitation_sum"] == 0.0
+
+
+def test_make_model_uses_plain_ridge_for_precipitation():
+    """A log1p/expm1 target transform was tried here to tame Ridge's raw-mm
+    extrapolation on precipitation_sum's skewed, zero-inflated distribution.
+    It backfired: expm1 is exponential, so a merely-moderate log-space
+    overshoot (easy to produce with production's many correlated features)
+    exploded on inversion, and even with the 500mm ceiling in place it
+    dragged backtest MAE from 1.13mm to 6.29mm. Reverted to plain Ridge."""
+    model_type, pipeline = _make_model("precipitation_sum")
+    assert model_type == "regression"
+    assert isinstance(pipeline.named_steps["model"], Ridge)
+
+
+def test_make_model_leaves_other_regression_targets_unwrapped():
+    model_type, pipeline = _make_model("max_temp")
+    assert model_type == "regression"
+    assert isinstance(pipeline.named_steps["model"], Ridge)

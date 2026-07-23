@@ -40,21 +40,38 @@ NON_NEGATIVE_TARGETS = {
     "cloud_cover", "humidity", "pressure_msl",
 }
 
-# Ridge also has no upper bound, and these two are percentages that can't
-# physically exceed 100 - normally harmless, but a row with a missing/imputed
-# feature can push the model to extrapolate past it (a real incident: 467.9%
-# predicted cloud cover for one location on a day several of its forecast
-# sources had a gap). Wind/precipitation/UV have no fixed physical ceiling
-# worth enforcing the same way.
-PERCENTAGE_TARGETS = {"cloud_cover", "humidity"}
+# Ridge also has no upper bound. cloud_cover/humidity are percentages that
+# can't physically exceed 100 - normally harmless, but a row with a missing/
+# imputed feature can push the model to extrapolate past it (a real incident:
+# 467.9% predicted cloud cover for one location on a day several of its
+# forecast sources had a gap). precipitation_sum has no fixed 0-100 bound, but
+# Ridge can still extrapolate wildly on the rare heavy-rain rows that are
+# least represented in training (a real incident: an 11,751mm prediction on a
+# day sources forecast 17-40mm). Australia's official 24h rainfall record is
+# ~907mm (Crohamhurst, 1893); 500mm safely bounds any plausible single-day
+# forecast while still catching genuine runaway extrapolation. Wind/UV have
+# no comparable ceiling worth enforcing.
+#
+# A log1p/expm1 target transform (TransformedTargetRegressor) was tried here
+# to compress precipitation's skewed tail before fitting. It made things
+# worse, not better: expm1 is exponential, so a log-space prediction that's
+# only moderately too high (easy to produce with production's many
+# correlated per-source/cross-source-stat features) explodes on inversion.
+# Even with this same 500mm ceiling in place, 1.6% of backtest predictions
+# landed at or near the ceiling on days with single-digit actual rainfall,
+# pushing overall MAE from 1.13mm to 6.29mm - worse than plain Ridge, and
+# visibly absurd in the report. Reverted; plain Ridge + this ceiling is the
+# simpler and more accurate option.
+CEILING_TARGETS = {"cloud_cover": 100.0, "humidity": 100.0, "precipitation_sum": 500.0}
 
 
 def clip_prediction(target_name: str, value: float) -> float:
     if target_name not in NON_NEGATIVE_TARGETS:
         return value
     value = max(0.0, value)
-    if target_name in PERCENTAGE_TARGETS:
-        value = min(100.0, value)
+    ceiling = CEILING_TARGETS.get(target_name)
+    if ceiling is not None:
+        value = min(ceiling, value)
     return value
 
 
