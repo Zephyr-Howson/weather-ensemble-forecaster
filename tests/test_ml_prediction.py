@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
 import pickle
+from datetime import UTC, date, datetime, timedelta
 
 import pandas as pd
 from sklearn.dummy import DummyRegressor
@@ -54,8 +54,8 @@ def test_build_prediction_feature_table_uses_tomorrow_forecasts(tmp_path):
         insert_forecasts(
             conn,
             [
-                _forecast_record("open_meteo_best_match", tomorrow, datetime.now().replace(microsecond=0), 25.0),
-                _forecast_record("open_meteo_gfs_global", tomorrow, datetime.now().replace(microsecond=0), 27.0),
+                _forecast_record("open_meteo_best_match", tomorrow, datetime.now(UTC).replace(microsecond=0, tzinfo=None), 25.0),
+                _forecast_record("open_meteo_gfs_global", tomorrow, datetime.now(UTC).replace(microsecond=0, tzinfo=None), 27.0),
             ],
         )
 
@@ -79,8 +79,8 @@ def test_build_prediction_feature_table_honors_explicit_target_date(tmp_path):
         insert_forecasts(
             conn,
             [
-                _forecast_record("open_meteo_best_match", tomorrow, datetime.now().replace(microsecond=0), 25.0),
-                _forecast_record("open_meteo_best_match", a_past_date, datetime.now().replace(microsecond=0), 18.0),
+                _forecast_record("open_meteo_best_match", tomorrow, datetime.now(UTC).replace(microsecond=0, tzinfo=None), 25.0),
+                _forecast_record("open_meteo_best_match", a_past_date, datetime.now(UTC).replace(microsecond=0, tzinfo=None), 18.0),
             ],
         )
 
@@ -118,7 +118,7 @@ def test_missing_source_is_filled_from_this_rows_own_median_not_left_nan(tmp_pat
             lat=location.lat,
             lon=location.lon,
             forecast_date=forecast_date,
-            collected_at=datetime.now().replace(microsecond=0),
+            collected_at=datetime.now(UTC).replace(microsecond=0, tzinfo=None),
             cloud_cover=cloud_cover,
             raw_json={},
         )
@@ -144,7 +144,7 @@ def test_missing_source_is_filled_from_this_rows_own_median_not_left_nan(tmp_pat
                     lat=location.lat,
                     lon=location.lon,
                     actual_date=d,
-                    collected_at=datetime.now().replace(microsecond=0),
+                    collected_at=datetime.now(UTC).replace(microsecond=0, tzinfo=None),
                     max_temp=20.0,
                     raw_json={},
                 ),
@@ -170,8 +170,8 @@ def test_predict_latest_ml_uses_live_forecast_rows(tmp_path):
         insert_forecasts(
             conn,
             [
-                _forecast_record("open_meteo_best_match", tomorrow, datetime.now().replace(microsecond=0), 25.0),
-                _forecast_record("open_meteo_gfs_global", tomorrow, datetime.now().replace(microsecond=0), 27.0),
+                _forecast_record("open_meteo_best_match", tomorrow, datetime.now(UTC).replace(microsecond=0, tzinfo=None), 25.0),
+                _forecast_record("open_meteo_gfs_global", tomorrow, datetime.now(UTC).replace(microsecond=0, tzinfo=None), 27.0),
             ],
         )
 
@@ -274,8 +274,8 @@ def test_predict_latest_ml_clips_negative_precipitation_to_zero(tmp_path):
         insert_forecasts(
             conn,
             [
-                _forecast_record("open_meteo_best_match", tomorrow, datetime.now().replace(microsecond=0), 25.0),
-                _forecast_record("open_meteo_gfs_global", tomorrow, datetime.now().replace(microsecond=0), 27.0),
+                _forecast_record("open_meteo_best_match", tomorrow, datetime.now(UTC).replace(microsecond=0, tzinfo=None), 25.0),
+                _forecast_record("open_meteo_gfs_global", tomorrow, datetime.now(UTC).replace(microsecond=0, tzinfo=None), 27.0),
             ],
         )
 

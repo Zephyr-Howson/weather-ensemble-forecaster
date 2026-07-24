@@ -130,7 +130,7 @@ def _backtest_ml(
                 predictions[f"{target_name}_probability"] = round(float(model.predict_proba(X_pred)[0][1]), 3)
         else:
             predictions[target_name] = round(clip_prediction(target_name, float(model.predict(X_pred)[0])), 2)
-        metadata[target_name] = {"model_type": model_type, "train_rows": int(len(data))}
+        metadata[target_name] = {"model_type": model_type, "train_rows": len(data)}
 
     if not predictions:
         return "skipped_insufficient_data"

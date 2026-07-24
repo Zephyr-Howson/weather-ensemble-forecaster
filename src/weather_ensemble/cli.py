@@ -6,6 +6,7 @@ import re
 import sys
 from pathlib import Path
 
+from weather_ensemble.backtest import backtest_predictions
 from weather_ensemble.config import (
     AUSTRALIAN_LOCATIONS,
     Location,
@@ -13,7 +14,6 @@ from weather_ensemble.config import (
     get_default_location,
     get_rolling_window_days,
 )
-from weather_ensemble.backtest import backtest_predictions
 from weather_ensemble.maintenance import deduplicate
 from weather_ensemble.ml import build_feature_table, predict_latest_ml, train_models
 from weather_ensemble.phases import deploy_all_phases
@@ -153,7 +153,9 @@ def _write_dataframe(df, path: Path) -> Path:
     try:
         df.to_parquet(path, index=False)
         return path
-    except Exception:
+    except Exception:  # noqa: BLE001 - parquet can fail for many library/serialization
+        # reasons (missing pyarrow, an unsupported dtype); any of them should
+        # fall back to CSV rather than crash the export.
         fallback = path.with_suffix(".csv")
         df.to_csv(fallback, index=False)
         return fallback
@@ -174,7 +176,7 @@ def _guarded(location: Location, step: str, fn) -> bool:
     try:
         fn()
         return True
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - deliberately catch-all, see docstring
         print(f"WARN: {step} failed for {location.name}: {_safe_error(exc)}")
         return False
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import pickle
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -16,7 +16,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
 from weather_ensemble import db
-from weather_ensemble.config import FORECAST_VARIABLES, Location, TARGETS
+from weather_ensemble.config import FORECAST_VARIABLES, TARGETS, Location
 from weather_ensemble.service import latest_forecasts_for_date, load_modelling_table
 
 TARGET_MAP = {target: f"actual_{target}" for target in TARGETS}
@@ -139,7 +139,7 @@ def _build_wide_feature_table(long_df: pd.DataFrame, include_targets: bool) -> p
             # already-filled column would understate source_std/source_range,
             # falsely implying every source agreed when one was silently a
             # stand-in for the rest.
-            wide[source_cols] = wide[source_cols].apply(lambda col: col.fillna(wide[f"source_median__{var}"]))
+            wide[source_cols] = wide[source_cols].apply(lambda col, var=var: col.fillna(wide[f"source_median__{var}"]))
 
     return wide.sort_values("forecast_date")
 
@@ -227,8 +227,8 @@ def train_models(
     results: dict[str, Any] = {
         "model_version": MODEL_VERSION,
         "location": location.name,
-        "rows_available": int(len(df)),
-        "trained_at": datetime.now().isoformat(timespec="seconds"),
+        "rows_available": len(df),
+        "trained_at": datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds"),
         "targets": {},
     }
 
@@ -260,19 +260,22 @@ def train_models(
 
         if model_type == "classification":
             preds = model.predict(X_test)
-            metrics = {"accuracy": float(accuracy_score(y_test, preds)), "train_rows": int(len(X_train)), "test_rows": int(len(X_test))}
+            metrics = {"accuracy": float(accuracy_score(y_test, preds)), "train_rows": len(X_train), "test_rows": len(X_test)}
             try:
                 probs = model.predict_proba(X_test)[:, 1]
                 metrics["auc"] = float(roc_auc_score(y_test, probs))
-            except Exception:
-                pass
+            except ValueError:
+                # y_test can end up with only one class present (a small/
+                # imbalanced split) - roc_auc_score requires both classes, so
+                # AUC is omitted for that target rather than failing training.
+                metrics["auc"] = None
         else:
             preds = [clip_prediction(target_name, p) for p in model.predict(X_test)]
             metrics = {
                 "mae": float(mean_absolute_error(y_test, preds)),
                 "rmse": float(mean_squared_error(y_test, preds) ** 0.5),
-                "train_rows": int(len(X_train)),
-                "test_rows": int(len(X_test)),
+                "train_rows": len(X_train),
+                "test_rows": len(X_test),
             }
 
         bundle = TrainedModelBundle(target=target_name, features=features, model=model, metrics=metrics, trained_at=results["trained_at"], model_type=model_type)
@@ -354,7 +357,7 @@ def predict_latest_ml(db_path: Path, location: Location, model_dir: Path, target
     if not predictions:
         return {"error": "No trained models found. Run --train first."}
 
-    generated_at = datetime.now().isoformat(timespec="seconds")
+    generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
     with db.connect(db_path) as conn:
         conn.execute(
             """

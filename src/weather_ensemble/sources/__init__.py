@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from weather_ensemble.config import Location, OPEN_METEO_MODELS
+from weather_ensemble.config import OPEN_METEO_MODELS, Location
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.sources import (
     accuweather,

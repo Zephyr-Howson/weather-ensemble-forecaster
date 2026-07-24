@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
-from weather_ensemble.config import Location, TIMEOUT_SECONDS, local_today
+from weather_ensemble.config import TIMEOUT_SECONDS, Location, local_today
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.retry import get_with_retry
 
@@ -70,7 +70,7 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         lat=location.lat,
         lon=location.lon,
         forecast_date=date.fromisoformat(day["datetime"]),
-        collected_at=datetime.now(),
+        collected_at=datetime.now(UTC).replace(tzinfo=None),
         max_temp=_to_float(day.get("tempmax")),
         min_temp=_to_float(day.get("tempmin")),
         rain_probability=_to_float(day.get("precipprob")),

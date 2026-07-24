@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -11,10 +11,10 @@ import pandas as pd
 from weather_ensemble import db
 from weather_ensemble.config import (
     FORECAST_VARIABLES,
-    Location,
     OPEN_METEO_BACKFILL_MODELS,
     RAIN_THRESHOLD_MM,
     TARGETS,
+    Location,
     local_today,
 )
 from weather_ensemble.models import ForecastRecord
@@ -35,7 +35,7 @@ def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]
     for source_name, fetcher in FORECAST_SOURCES.items():
         try:
             records.append(fetcher(location))
-        except Exception as exc:  # keep collection robust if one source fails
+        except Exception as exc:  # noqa: BLE001 - keep collection robust if one source fails
             print(f"WARN: {source_name} failed: {_safe_error(exc)}")
 
     with db.connect(db_path) as conn:
@@ -53,7 +53,7 @@ def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastR
     for source_name, fetcher in OPEN_METEO_FORECAST_SOURCES.items():
         try:
             records.append(fetcher(location))
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - keep collection robust if one source fails
             print(f"WARN: {source_name} failed: {_safe_error(exc)}")
 
     with db.connect(db_path) as conn:
@@ -82,7 +82,7 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
             try:
                 actual = open_meteo.fetch_actual(location, today - timedelta(days=i))
                 db.upsert_actual(conn, actual)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the whole backfill
                 print(f"WARN: actual backfill failed for day -{i}: {_safe_error(exc)}")
 
         for model in OPEN_METEO_BACKFILL_MODELS:
@@ -90,7 +90,7 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
                 records = open_meteo.fetch_historical_forecasts(location, days_back, model=model)
                 inserted = db.insert_forecasts(conn, records)
                 print(f"Backfilled {inserted} rows for open_meteo_{model}")
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - one bad model shouldn't abort the whole backfill
                 print(f"WARN: historical backfill failed for open_meteo_{model}: {_safe_error(exc)}")
 
 
@@ -265,7 +265,7 @@ def blend_forecast(db_path: Path, location: Location, window_days: int, target_d
             """,
             (
                 location.name, location.lat, location.lon, target_date.isoformat(),
-                datetime.now().isoformat(timespec="seconds"), window_days,
+                datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds"), window_days,
                 blended.get("max_temp"), blended.get("min_temp"), blended.get("rain_probability"),
                 blended.get("precipitation_sum"), blended.get("did_rain"),
                 blended.get("wind_speed"), blended.get("wind_gusts"), blended.get("cloud_cover"),

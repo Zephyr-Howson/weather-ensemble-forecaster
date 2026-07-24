@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
-
-from datetime import timedelta
 
 from weather_ensemble import db
 from weather_ensemble.config import RAIN_THRESHOLD_MM, TARGETS, Location, local_today

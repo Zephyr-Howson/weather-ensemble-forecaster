@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from weather_ensemble.config import Location
 from weather_ensemble.db import connect, insert_forecasts, upsert_actual
@@ -17,7 +17,7 @@ def _forecast(source: str, forecast_date: date, value: float) -> ForecastRecord:
         lat=LOCATION.lat,
         lon=LOCATION.lon,
         forecast_date=forecast_date,
-        collected_at=datetime.now().replace(microsecond=0),
+        collected_at=datetime.now(UTC).replace(microsecond=0, tzinfo=None),
         max_temp=value,
         raw_json={},
     )
@@ -30,7 +30,7 @@ def _actual(actual_date: date, value: float) -> ActualRecord:
         lat=LOCATION.lat,
         lon=LOCATION.lon,
         actual_date=actual_date,
-        collected_at=datetime.now().replace(microsecond=0),
+        collected_at=datetime.now(UTC).replace(microsecond=0, tzinfo=None),
         max_temp=value,
         raw_json={},
     )

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo
 
-from weather_ensemble.config import Location, TIMEOUT_SECONDS
+from weather_ensemble.config import TIMEOUT_SECONDS, Location
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.retry import get_with_retry
 
@@ -15,9 +15,9 @@ def _to_float(value: object) -> float | None:
         return None
 
 
-def _local_date(iso_timestamp: str, timezone: str) -> date:
-    dt = datetime.fromisoformat(iso_timestamp.replace("Z", "+00:00"))
-    return dt.astimezone(ZoneInfo(timezone)).date()
+def _local_date(iso_timestamp: str, tz_name: str) -> date:
+    dt = datetime.fromisoformat(iso_timestamp)
+    return dt.astimezone(ZoneInfo(tz_name)).date()
 
 
 def _geohash(location: Location) -> str:
@@ -68,7 +68,7 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         lat=location.lat,
         lon=location.lon,
         forecast_date=_local_date(day["date"], location.timezone),
-        collected_at=datetime.now(),
+        collected_at=datetime.now(UTC).replace(tzinfo=None),
         max_temp=_to_float(day.get("temp_max")),
         min_temp=_to_float(day.get("temp_min")),
         rain_probability=_to_float(rain.get("chance")),

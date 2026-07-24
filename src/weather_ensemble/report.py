@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
 
@@ -350,8 +350,8 @@ def _axis_layout(fig: go.Figure) -> None:
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="system-ui, -apple-system, 'Segoe UI', sans-serif", color=CHROME["light"]["font"], size=13),
-        margin=dict(l=8, r=48, t=8, b=36),
+        font={"family": "system-ui, -apple-system, 'Segoe UI', sans-serif", "color": CHROME["light"]["font"], "size": 13},
+        margin={"l": 8, "r": 48, "t": 8, "b": 36},
         showlegend=False,
     )
     fig.update_xaxes(gridcolor=CHROME["light"]["grid"], linecolor=CHROME["light"]["axis"], zeroline=False, showgrid=True)
@@ -428,7 +428,7 @@ def _trend_figure(
                 legendgroup=style["legend"],
                 showlegend=show,
                 opacity=style["opacity"],
-                line=dict(color=style["light"], width=style["width"], dash=style["dash"]),
+                line={"color": style["light"], "width": style["width"], "dash": style["dash"]},
                 hovertemplate=f"{escape(_display_name(model))}: %{{y:.3f}}<extra></extra>",
             )
         )
@@ -436,8 +436,11 @@ def _trend_figure(
         colors_dark.append(style["dark"])
 
     _axis_layout(fig)
-    fig.update_layout(showlegend=True, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11)))
-    fig.update_layout(hovermode="x unified", height=height, margin=dict(l=48, r=16, t=48, b=36))
+    fig.update_layout(
+        showlegend=True,
+        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0, "font": {"size": 11}},
+    )
+    fig.update_layout(hovermode="x unified", height=height, margin={"l": 48, "r": 16, "t": 48, "b": 36})
     fig.update_yaxes(title_text="rolling MAE", showgrid=True, rangemode="tozero")
     return fig, colors_light, colors_dark
 
@@ -876,7 +879,7 @@ def build_html_report(
     n_locations = long_df["location_name"].nunique()
     date_min = long_df["forecast_date"].min().date()
     date_max = long_df["forecast_date"].max().date()
-    generated = datetime.now().isoformat(timespec="minutes")
+    generated = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="minutes")
 
     location_options = "".join(
         f'<option value="{escape(loc)}">{escape(loc)}</option>' for loc in location_names

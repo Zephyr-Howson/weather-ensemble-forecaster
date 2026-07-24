@@ -2,7 +2,15 @@ from __future__ import annotations
 
 from weather_ensemble import retry
 from weather_ensemble.config import Location
-from weather_ensemble.sources import accuweather, bom, openweathermap, silo, visual_crossing, weatherapi, weatherbit
+from weather_ensemble.sources import (
+    accuweather,
+    bom,
+    openweathermap,
+    silo,
+    visual_crossing,
+    weatherapi,
+    weatherbit,
+)
 
 
 class _FakeResponse:

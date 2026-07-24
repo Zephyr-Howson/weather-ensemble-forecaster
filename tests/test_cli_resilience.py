@@ -10,24 +10,24 @@ LOCATION = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Aust
 
 
 def _base_args(**overrides) -> argparse.Namespace:
-    defaults = dict(
-        db=Path("unused.db"),
-        window=30,
-        train_window=90,
-        model_dir=Path("models"),
-        deploy_phases=None,
-        backfill=None,
-        collect_open_meteo=False,
-        collect=False,
-        all=False,
-        record_actual=False,
-        forecast=False,
-        export=None,
-        build_dataset=None,
-        train=False,
-        predict_ml=False,
-        backtest_days=None,
-    )
+    defaults = {
+        "db": Path("unused.db"),
+        "window": 30,
+        "train_window": 90,
+        "model_dir": Path("models"),
+        "deploy_phases": None,
+        "backfill": None,
+        "collect_open_meteo": False,
+        "collect": False,
+        "all": False,
+        "record_actual": False,
+        "forecast": False,
+        "export": None,
+        "build_dataset": None,
+        "train": False,
+        "predict_ml": False,
+        "backtest_days": None,
+    }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
 

@@ -33,7 +33,9 @@ def deploy_all_phases(
     else:
         try:
             feature_df.to_parquet(processed_path, index=False)
-        except Exception:
+        except Exception:  # noqa: BLE001 - parquet can fail for many library/serialization
+            # reasons (missing pyarrow, an unsupported dtype); any of them should
+            # fall back to CSV rather than crash the export.
             processed_path = processed_path.with_suffix(".csv")
             feature_df.to_csv(processed_path, index=False)
 
@@ -55,8 +57,8 @@ def deploy_all_phases(
         },
         "phase_2_dataset": {
             "status": "complete",
-            "rows": int(len(feature_df)),
-            "columns": int(len(feature_df.columns)) if not feature_df.empty else 0,
+            "rows": len(feature_df),
+            "columns": len(feature_df.columns) if not feature_df.empty else 0,
             "path": str(processed_path),
         },
         "phase_3_model": {

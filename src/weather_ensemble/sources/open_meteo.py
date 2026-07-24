@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
-from weather_ensemble.config import Location, RAIN_THRESHOLD_MM, TIMEOUT_SECONDS, local_today
+import requests
+
+from weather_ensemble.config import RAIN_THRESHOLD_MM, TIMEOUT_SECONDS, Location, local_today
 from weather_ensemble.models import ActualRecord, ForecastRecord
 from weather_ensemble.retry import get_with_retry
 
@@ -90,7 +92,7 @@ def fetch_forecast(location: Location, model: str = "best_match") -> ForecastRec
         lat=location.lat,
         lon=location.lon,
         forecast_date=target_date,
-        collected_at=datetime.now(),
+        collected_at=datetime.now(UTC).replace(tzinfo=None),
         max_temp=_safe(daily.get("temperature_2m_max"), idx),
         min_temp=_safe(daily.get("temperature_2m_min"), idx),
         rain_probability=_safe(daily.get("precipitation_probability_max"), idx),
@@ -129,7 +131,7 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
         lat=location.lat,
         lon=location.lon,
         actual_date=target_date,
-        collected_at=datetime.now(),
+        collected_at=datetime.now(UTC).replace(tzinfo=None),
         max_temp=_safe(daily.get("temperature_2m_max"), 0),
         min_temp=_safe(daily.get("temperature_2m_min"), 0),
         precipitation_sum=precip,
@@ -178,7 +180,7 @@ def fetch_historical_forecasts(location: Location, days_back: int, model: str = 
             response = get_with_retry(url, params=request_params, timeout=TIMEOUT_SECONDS)
             payload = response.json()
             break
-        except Exception as exc:  # pragma: no cover
+        except (requests.RequestException, ValueError) as exc:  # pragma: no cover
             last_error = exc
 
     if payload is None:
