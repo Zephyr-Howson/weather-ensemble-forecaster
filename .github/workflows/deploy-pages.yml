@@ -5,11 +5,13 @@ name: Deploy accuracy report to Pages
 # - `push` fires for a commit pushed with real user credentials (e.g. a manual
 #   fix pushed outside the nightly run) - but GitHub deliberately does NOT fire
 #   `push` for a commit made with the default GITHUB_TOKEN, to prevent
-#   workflow-triggers-workflow loops. daily-collect.yml's automated commit uses
-#   exactly that default token, so `push` alone would never catch the nightly
-#   run.
-# - `workflow_run` fires whenever daily-collect.yml finishes, regardless of
-#   what token it pushed with - covering the nightly case `push` misses.
+#   workflow-triggers-workflow loops. regenerate-report.yml's automated commit
+#   uses exactly that default token, so `push` alone would never catch it.
+# - `workflow_run` fires whenever regenerate-report.yml finishes, regardless
+#   of what token it pushed with - covering the case `push` misses. (Not
+#   daily-collect.yml - that workflow no longer touches the report at all,
+#   only the underlying database; regenerate-report.yml is what actually
+#   produces reports/accuracy_report.html now.)
 #
 # Together, any change to the report - nightly or ad hoc - redeploys Pages
 # within a minute or two, instead of only catching up once a day.
@@ -19,7 +21,7 @@ on:
     paths:
       - reports/accuracy_report.html
   workflow_run:
-    workflows: ["Daily forecast collection"]
+    workflows: ["Regenerate accuracy report"]
     types: [completed]
   workflow_dispatch:
 

@@ -55,25 +55,48 @@ jobs:
             --all-locations \
             --all --window 30 --train --train-window 90 --predict-ml
 
-      - name: Regenerate accuracy report across all locations
-        run: |
-          weather-ensemble \
-            --all-locations \
-            --accuracy-report reports/accuracy_report.html
-
-      - name: Commit updated database and accuracy report
+      - name: Commit and push the updated database
+        # A real incident: `git pull --rebase` here failed outright, over and
+        # over (most of the pipeline's first two weeks), whenever ANYTHING
+        # else pushed to main while this job's ~40 minutes of collection was
+        # running - another workflow_dispatch run, or any manual push from
+        # local dev work. data/weather.db is a single opaque SQLite binary;
+        # git cannot diff or merge two independently-changed copies of it, so
+        # a rebase conflict on it is unresolvable, and the WHOLE step (and
+        # the whole day's freshly-collected data) was lost every time this
+        # happened. Fixed by never rebasing at all: each retry re-syncs the
+        # branch to whatever is currently on origin (so nothing else's
+        # changes are ever discarded) and then re-applies only this run's own
+        # data/weather.db on top before committing - so a race can, at worst,
+        # cost this job's own DB update one more fetch-and-retry, never a
+        # dropped commit.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/weather.db reports/accuracy_report.html
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-          git commit -m "Daily forecast collection $(date -u +%Y-%m-%d)"
-          git pull --rebase
-          git push
+          cp data/weather.db /tmp/collected_weather.db
 
-      # GitHub Pages deployment lives in its own workflow (deploy-pages.yml) so
-      # it redeploys on *any* push that changes the report - including a manual
-      # fix pushed outside this nightly run - not just once a day here.
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/collected_weather.db data/weather.db
+            git add data/weather.db
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+              exit 0
+            fi
+            git commit -m "Daily forecast collection $(date -u +%Y-%m-%d)"
+            if git push origin HEAD:main; then
+              echo "Pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt/5) - retrying against latest main"
+            sleep $((attempt * 5))
+          done
+          echo "::error::Failed to push data/weather.db after 5 attempts"
+          exit 1
+
+      # Report regeneration lives in its own workflow (regenerate-report.yml),
+      # triggered by this workflow completing - a shorter, separately
+      # retriggerable step means a failure/race there can never also cost
+      # this run's actual data collection, and it can be re-run on demand
+      # without redoing the whole 30-location collection.

@@ -1,0 +1,93 @@
+name: Regenerate accuracy report
+
+# Split out from daily-collect.yml so a failure/race here can never also cost
+# that job's actual data collection, and so the report can be refreshed on
+# demand (workflow_dispatch) without redoing the whole 30-location collection
+# - previously the only way to do that was a manual local run.
+#
+# Three triggers, because a single one can't cover every case that should
+# refresh the report:
+# - `workflow_run` covers the normal nightly case: once daily-collect.yml
+#   finishes collecting fresh data.
+# - `push` on data/weather.db covers a manual local push (a backfill, a
+#   dedupe, a retrain) that changes the underlying data outside the nightly
+#   run - this is exactly the step that's been forgotten/done by hand
+#   repeatedly so far.
+# - `workflow_dispatch` covers "just regenerate it right now" with no
+#   underlying data change at all (e.g. after a report-rendering code fix).
+on:
+  workflow_run:
+    workflows: ["Daily forecast collection"]
+    types: [completed]
+  push:
+    branches: [main]
+    paths:
+      - data/weather.db
+  workflow_dispatch:
+
+concurrency:
+  group: regenerate-report
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  regenerate:
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # workflow_run doesn't automatically check out the triggering run's
+          # own commit - pin explicitly to it so this can't ever regenerate
+          # the report from data older than what daily-collect just pushed.
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: python -m pip install -U pip
+      - run: pip install -e .
+
+      - name: Regenerate accuracy report across all locations
+        run: |
+          weather-ensemble \
+            --all-locations \
+            --accuracy-report reports/accuracy_report.html
+
+      - name: Commit and push the regenerated report
+        # Same non-rebasing retry pattern as daily-collect.yml's DB commit -
+        # see that step's comment for why. reports/accuracy_report.html is
+        # regenerated wholesale from the DB, not a database of its own, but a
+        # merge conflict on its multi-megabyte Plotly payload would be just
+        # as unresolvable as a binary one in practice.
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp reports/accuracy_report.html /tmp/accuracy_report.html
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin main
+            git reset --hard origin/main
+            cp /tmp/accuracy_report.html reports/accuracy_report.html
+            git add reports/accuracy_report.html
+            if git diff --cached --quiet; then
+              echo "No changes to commit"
+              exit 0
+            fi
+            git commit -m "Regenerate accuracy report $(date -u +%Y-%m-%dT%H:%M)"
+            if git push origin HEAD:main; then
+              echo "Pushed on attempt $attempt"
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt/5) - retrying against latest main"
+            sleep $((attempt * 5))
+          done
+          echo "::error::Failed to push accuracy_report.html after 5 attempts"
+          exit 1
+
+      # GitHub Pages deployment lives in its own workflow (deploy-pages.yml),
+      # triggered by this workflow completing.
