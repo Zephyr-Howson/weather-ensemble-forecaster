@@ -44,11 +44,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # workflow_run doesn't automatically check out the triggering run's
-          # commit - pin explicitly to it so a still-in-flight daily-collect
-          # run can't ever have this job deploy an older report than what it
-          # just committed.
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # A real incident (see regenerate-report.yml's identical comment):
+          # pinning to `github.event.workflow_run.head_sha` does not reliably
+          # get the triggering run's own final commit - a run built from data
+          # that was missing what regenerate-report.yml had already pushed.
+          # Checking out `main` by name always resolves to whatever is
+          # actually on the branch right now, with no such ambiguity.
+          ref: main
 
       - name: Prepare Pages site
         run: |

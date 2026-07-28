@@ -40,10 +40,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # workflow_run doesn't automatically check out the triggering run's
-          # own commit - pin explicitly to it so this can't ever regenerate
-          # the report from data older than what daily-collect just pushed.
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          # A real incident: this used to pin to
+          # `github.event.workflow_run.head_sha`, on the assumption that it
+          # reflects the triggering run's own final commit. It doesn't -
+          # empirically, a run regenerated a report that was missing data
+          # that already existed in daily-collect's own just-pushed commit,
+          # meaning this checkout out something older/stale instead. Checking
+          # out `main` by name sidesteps the ambiguity entirely: it always
+          # resolves to whatever is actually on the branch right now.
+          ref: main
 
       - uses: actions/setup-python@v5
         with:
