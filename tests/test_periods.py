@@ -5,8 +5,8 @@ from datetime import UTC, date, datetime, timedelta
 import pandas as pd
 
 from weather_ensemble.backtest import backtest_period_predictions
-from weather_ensemble.config import Location
-from weather_ensemble.db import connect, insert_forecast_periods, upsert_actual_period
+from weather_ensemble.config import Location, get_periods_db_path
+from weather_ensemble.db import connect_periods, insert_forecast_periods, upsert_actual_period
 from weather_ensemble.ml import predict_latest_ml_period, train_period_model
 from weather_ensemble.models import ActualPeriodRecord, ForecastPeriodRecord
 from weather_ensemble.service import blend_forecast_period, compute_period_mae_scores
@@ -46,7 +46,7 @@ def test_insert_forecast_periods_and_upsert_actual_period_roundtrip(tmp_path):
     db_path = tmp_path / "weather.db"
     day = date(2026, 7, 28)
 
-    with connect(db_path) as conn:
+    with connect_periods(get_periods_db_path(db_path)) as conn:
         n = insert_forecast_periods(conn, [_forecast_period("open_meteo_best_match", day, "morning", 1.2)])
         assert n == 1
         upsert_actual_period(conn, _actual_period(day, "morning", 0.8))
@@ -64,7 +64,7 @@ def test_upsert_actual_period_updates_existing_row_not_a_duplicate(tmp_path):
     db_path = tmp_path / "weather.db"
     day = date(2026, 7, 28)
 
-    with connect(db_path) as conn:
+    with connect_periods(get_periods_db_path(db_path)) as conn:
         upsert_actual_period(conn, _actual_period(day, "evening", 0.0))
         upsert_actual_period(conn, _actual_period(day, "evening", 4.5))  # corrected/re-collected value
 
@@ -99,7 +99,7 @@ def test_blend_forecast_period_reconstruction_excludes_lookahead_history(tmp_pat
     before1, before2, after = date(2026, 6, 8), date(2026, 6, 9), date(2026, 6, 11)
     actual_value = 5.0
 
-    with connect(db_path) as conn:
+    with connect_periods(get_periods_db_path(db_path)) as conn:
         insert_forecast_periods(
             conn,
             [
@@ -137,7 +137,7 @@ def test_train_and_predict_period_model_end_to_end(tmp_path):
     days = [start + timedelta(days=i) for i in range(35)]  # comfortably over MIN_TRAIN_ROWS=30
     tomorrow = days[-1] + timedelta(days=1)
 
-    with connect(db_path) as conn:
+    with connect_periods(get_periods_db_path(db_path)) as conn:
         for i, day in enumerate(days):
             precip = 0.0 if i % 4 else 2.0 + i * 0.05
             insert_forecast_periods(
@@ -165,7 +165,7 @@ def test_train_and_predict_period_model_end_to_end(tmp_path):
     assert predict_result["forecast_date"] == tomorrow.isoformat()
     assert predict_result["precipitation_sum"] >= 0.0  # clip_prediction floors negative Ridge output at 0
 
-    with connect(db_path) as conn:
+    with connect_periods(get_periods_db_path(db_path)) as conn:
         row = conn.execute(
             "SELECT forecast_date, period, precipitation_sum FROM ml_predictions_periods WHERE location_name = ?",
             (LOCATION.name,),
@@ -190,7 +190,7 @@ def test_backtest_period_predictions_writes_ensemble_and_ml_rows(tmp_path):
     days = [start + timedelta(days=i) for i in range(32)]  # 31 days history + 1 target day
     target_day = days[-1]
 
-    with connect(db_path) as conn:
+    with connect_periods(get_periods_db_path(db_path)) as conn:
         for i, day in enumerate(days):
             precip = 0.0 if i % 3 else 2.0 + i * 0.05
             insert_forecast_periods(
@@ -207,7 +207,7 @@ def test_backtest_period_predictions_writes_ensemble_and_ml_rows(tmp_path):
     assert result["ensemble"].get("written") == 1
     assert result["ml"].get("written") == 1
 
-    with connect(db_path) as conn:
+    with connect_periods(get_periods_db_path(db_path)) as conn:
         ensemble_row = conn.execute(
             "SELECT forecast_date, period, precipitation_sum FROM ensemble_predictions_periods WHERE location_name = ?",
             (LOCATION.name,),

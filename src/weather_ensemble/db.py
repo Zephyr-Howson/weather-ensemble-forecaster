@@ -53,6 +53,15 @@ def connect(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_periods(db_path: Path) -> sqlite3.Connection:
+    """Sub-daily rain tables live in their own file - see get_periods_db_path."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_periods_db(conn)
+    return conn
+
+
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in existing:
@@ -163,7 +172,48 @@ def init_db(conn: sqlite3.Connection) -> None:
             metadata_json TEXT,
             UNIQUE(location_name, forecast_date, generated_at)
         );
+        """
+    )
 
+    # Lightweight migrations for existing local databases created by earlier versions.
+    for col in ["precipitation_sum", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
+        _add_column_if_missing(conn, "forecasts", col, "REAL")
+    _add_column_if_missing(conn, "forecasts", "collection_method", "TEXT")
+    for col in ["did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
+        _add_column_if_missing(conn, "actuals", col, "REAL")
+    # Earlier versions had actuals.rain_probability. Leave it if present; no new code uses it.
+    for col in ["precipitation_sum", "did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
+        _add_column_if_missing(conn, "ensemble_predictions", col, "REAL")
+    for col in ["cloud_cover", "humidity", "pressure_msl"]:
+        _add_column_if_missing(conn, "ml_predictions", col, "REAL")
+
+    # uv_index was removed: forecast and actual sources turned out to measure
+    # different things (forecast-side values ran ~2-4x the observed ground
+    # truth, a systematic bias not noise - see the "why is the UV trend graph
+    # strange" investigation), making it meaningless to keep. Drop it from any
+    # database created by an earlier version.
+    for table in ["forecasts", "actuals", "ensemble_predictions", "ml_predictions"]:
+        _drop_column_if_present(conn, table, "uv_index")
+
+    # Rows inserted before collection_method existed have no way to record how
+    # they were collected. Recover it from the raw_json tag that
+    # fetch_historical_forecasts stamps on backfilled rows; everything else was
+    # collected live.
+    conn.execute(
+        "UPDATE forecasts SET collection_method = 'backfill' "
+        "WHERE collection_method IS NULL AND raw_json LIKE '%historical_forecast_or_past_days%'"
+    )
+    conn.execute("UPDATE forecasts SET collection_method = 'live' WHERE collection_method IS NULL")
+    conn.commit()
+
+
+def init_periods_db(conn: sqlite3.Connection) -> None:
+    """Sub-daily rain tables, in their own file (see get_periods_db_path) -
+    kept out of init_db's file so this feature's data can grow without
+    pushing the main file toward GitHub's 100MB per-file hard limit.
+    """
+    conn.executescript(
+        """
         CREATE TABLE IF NOT EXISTS forecast_periods (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             source TEXT NOT NULL,
@@ -228,36 +278,6 @@ def init_db(conn: sqlite3.Connection) -> None:
         );
         """
     )
-
-    # Lightweight migrations for existing local databases created by earlier versions.
-    for col in ["precipitation_sum", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
-        _add_column_if_missing(conn, "forecasts", col, "REAL")
-    _add_column_if_missing(conn, "forecasts", "collection_method", "TEXT")
-    for col in ["did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
-        _add_column_if_missing(conn, "actuals", col, "REAL")
-    # Earlier versions had actuals.rain_probability. Leave it if present; no new code uses it.
-    for col in ["precipitation_sum", "did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
-        _add_column_if_missing(conn, "ensemble_predictions", col, "REAL")
-    for col in ["cloud_cover", "humidity", "pressure_msl"]:
-        _add_column_if_missing(conn, "ml_predictions", col, "REAL")
-
-    # uv_index was removed: forecast and actual sources turned out to measure
-    # different things (forecast-side values ran ~2-4x the observed ground
-    # truth, a systematic bias not noise - see the "why is the UV trend graph
-    # strange" investigation), making it meaningless to keep. Drop it from any
-    # database created by an earlier version.
-    for table in ["forecasts", "actuals", "ensemble_predictions", "ml_predictions"]:
-        _drop_column_if_present(conn, table, "uv_index")
-
-    # Rows inserted before collection_method existed have no way to record how
-    # they were collected. Recover it from the raw_json tag that
-    # fetch_historical_forecasts stamps on backfilled rows; everything else was
-    # collected live.
-    conn.execute(
-        "UPDATE forecasts SET collection_method = 'backfill' "
-        "WHERE collection_method IS NULL AND raw_json LIKE '%historical_forecast_or_past_days%'"
-    )
-    conn.execute("UPDATE forecasts SET collection_method = 'live' WHERE collection_method IS NULL")
     conn.commit()
 
 

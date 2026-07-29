@@ -9,7 +9,7 @@ from typing import Any
 import pandas as pd
 
 from weather_ensemble import db
-from weather_ensemble.config import Location
+from weather_ensemble.config import Location, get_periods_db_path
 from weather_ensemble.ml import (
     CLASSIFICATION_TARGETS,
     FEATURE_TARGET_OVERRIDE,
@@ -290,7 +290,7 @@ def backtest_period_predictions(
 
     wide_all = _build_wide_feature_table(long_df, include_targets=True)
 
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         existing_ensemble = _existing_forecast_dates_period(conn, "ensemble_predictions_periods", location, period)
         existing_ml = _existing_forecast_dates_period(conn, "ml_predictions_periods", location, period)
 

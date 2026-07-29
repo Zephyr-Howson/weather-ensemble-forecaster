@@ -16,6 +16,7 @@ from weather_ensemble.config import (
     RAIN_THRESHOLD_MM,
     TARGETS,
     Location,
+    get_periods_db_path,
     local_today,
 )
 from weather_ensemble.models import ForecastRecord
@@ -107,7 +108,7 @@ def collect_forecast_periods(db_path: Path, location: Location) -> int:
         except Exception as exc:  # noqa: BLE001 - keep collection robust if one model fails
             print(f"WARN: open_meteo_{model} periods failed: {_safe_error(exc)}")
 
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         return db.insert_forecast_periods(conn, records)
 
 
@@ -115,7 +116,7 @@ def record_actual_periods(db_path: Path, location: Location, target_date: date |
     if target_date is None:
         target_date = local_today(location) - timedelta(days=1)
     records = open_meteo.fetch_actual_periods(location, target_date)
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         for r in records:
             db.upsert_actual_period(conn, r)
 
@@ -125,7 +126,7 @@ def backfill_periods(db_path: Path, location: Location, days_back: int) -> None:
     Open-Meteo model's forecast_periods - mirrors backfill() above.
     """
     today = local_today(location)
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         for i in range(1, days_back + 1):
             try:
                 records = open_meteo.fetch_actual_periods(location, today - timedelta(days=i))
@@ -337,7 +338,7 @@ def load_period_modelling_table(
     if window_days:
         cutoff = (local_today(location) - timedelta(days=window_days)).isoformat()
 
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         return pd.read_sql_query(
             """
             WITH ranked AS (
@@ -379,7 +380,7 @@ def compute_period_mae_scores(df: pd.DataFrame) -> dict[str, float]:
 
 
 def latest_forecast_periods_for_date(db_path: Path, location: Location, period: str, target_date: date) -> pd.DataFrame:
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         return pd.read_sql_query(
             """
             SELECT f.*
@@ -446,7 +447,7 @@ def blend_forecast_period(
     scores = compute_period_mae_scores(history_df)
     blended, metadata = blend_period_precipitation(forecast_df, scores)
 
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO ensemble_predictions_periods (

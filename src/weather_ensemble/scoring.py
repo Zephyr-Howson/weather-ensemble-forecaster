@@ -6,7 +6,14 @@ from pathlib import Path
 import pandas as pd
 
 from weather_ensemble import db
-from weather_ensemble.config import PERIODS, RAIN_THRESHOLD_MM, TARGETS, Location, local_today
+from weather_ensemble.config import (
+    PERIODS,
+    RAIN_THRESHOLD_MM,
+    TARGETS,
+    Location,
+    get_periods_db_path,
+    local_today,
+)
 from weather_ensemble.service import load_modelling_table, load_period_modelling_table
 
 BASELINE_PERSISTENCE = "baseline_persistence"
@@ -268,7 +275,7 @@ def _ensemble_predictions_period(
     db_path: Path, location: Location, period: str, window_days: int | None = None
 ) -> list[dict]:
     cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         wide = pd.read_sql_query(
             """
             WITH latest AS (
@@ -312,7 +319,7 @@ def _ml_predictions_period(
     db_path: Path, location: Location, period: str, window_days: int | None = None
 ) -> list[dict]:
     cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         wide = pd.read_sql_query(
             """
             WITH latest AS (
@@ -367,7 +374,7 @@ def _baseline_predictions_period(
         if window_days
         else "0000-01-01"
     )
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         actuals = pd.read_sql_query(
             "SELECT location_name, actual_date, precipitation_sum FROM actual_periods "
             "WHERE location_name = ? AND period = ? AND actual_date >= ? ORDER BY actual_date",

@@ -46,9 +46,11 @@ TIMEOUT_SECONDS = 15
 
 # Sub-daily rain prediction (small slice, precipitation only - see
 # ForecastPeriodRecord). Hour ranges are the location's local hour-of-day,
-# end-exclusive: morning is [6, 12), afternoon is [12, 18), evening is
-# [18, 24). Hours 0-6 (overnight) are deliberately out of scope for now.
+# end-exclusive. Listed in chronological order - report.py's card order and
+# every walk-forward loop below follow this dict's order, so keep it that way
+# rather than alphabetical.
 PERIOD_HOURS: dict[str, tuple[int, int]] = {
+    "overnight": (0, 6),
     "morning": (6, 12),
     "afternoon": (12, 18),
     "evening": (18, 24),
@@ -161,6 +163,23 @@ def local_today(location: Location) -> date:
 
 def get_db_path() -> Path:
     return Path(os.getenv("WEATHER_DB_PATH", "data/weather.db"))
+
+
+def get_periods_db_path(db_path: Path | None = None) -> Path:
+    """Sub-daily rain data lives in its own SQLite file, next to the main one.
+
+    Splitting it out keeps either file's individual size from climbing as
+    fast - the combined file already drew a GitHub warning at 92MB (their
+    hard limit is 100MB, per-file) after this feature's first day of data
+    across 30 locations. Defaults to WEATHER_PERIODS_DB_PATH if set,
+    otherwise "<name>_periods<suffix>" next to whatever db_path resolves to
+    (so a custom --db path still gets a sensibly-named sibling file).
+    """
+    env_override = os.getenv("WEATHER_PERIODS_DB_PATH")
+    if env_override:
+        return Path(env_override)
+    base = db_path if db_path is not None else get_db_path()
+    return base.with_name(f"{base.stem}_periods{base.suffix}")
 
 
 def get_default_location() -> Location:

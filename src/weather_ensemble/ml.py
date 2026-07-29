@@ -16,7 +16,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 
 from weather_ensemble import db
-from weather_ensemble.config import FORECAST_VARIABLES, TARGETS, Location
+from weather_ensemble.config import FORECAST_VARIABLES, TARGETS, Location, get_periods_db_path
 from weather_ensemble.service import (
     latest_forecast_periods_for_date,
     latest_forecasts_for_date,
@@ -417,7 +417,7 @@ def predict_latest_ml_period(
     metadata = {"precipitation_sum": {"model_type": bundle.model_type, **bundle.metrics}}
 
     generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
-    with db.connect(db_path) as conn:
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
         conn.execute(
             """
             INSERT OR IGNORE INTO ml_predictions_periods (
