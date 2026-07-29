@@ -6,27 +6,40 @@ import re
 import sys
 from pathlib import Path
 
-from weather_ensemble.backtest import backtest_predictions
+import pandas as pd
+
+from weather_ensemble.backtest import backtest_period_predictions, backtest_predictions
 from weather_ensemble.config import (
     AUSTRALIAN_LOCATIONS,
+    PERIODS,
     Location,
     get_db_path,
     get_default_location,
     get_rolling_window_days,
 )
 from weather_ensemble.maintenance import deduplicate
-from weather_ensemble.ml import build_feature_table, predict_latest_ml, train_models
+from weather_ensemble.ml import (
+    build_feature_table,
+    predict_latest_ml,
+    predict_latest_ml_period,
+    train_models,
+    train_period_model,
+)
 from weather_ensemble.phases import deploy_all_phases
 from weather_ensemble.report import build_html_report
-from weather_ensemble.scoring import build_predictions_long
+from weather_ensemble.scoring import build_period_predictions_long, build_predictions_long
 from weather_ensemble.service import (
     _safe_error,
     backfill,
+    backfill_periods,
     blend_forecast,
+    blend_forecast_period,
+    collect_forecast_periods,
     collect_forecasts,
     collect_open_meteo_only,
     export_modelling_table,
     record_actual,
+    record_actual_periods,
 )
 
 
@@ -142,6 +155,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove duplicate rows across forecasts/actuals/ensemble_predictions/ml_predictions "
         "(same source/location/date), keeping the highest-priority one (whole database, not per-location)",
     )
+
+    # Small-slice sub-daily (morning/afternoon/evening) rain prediction - kept
+    # as separate, explicit, opt-in flags rather than folded into --all/
+    # --deploy-phases, so nothing about the existing daily pipeline's
+    # behavior changes until this is validated. Open-Meteo only (see
+    # ForecastPeriodRecord); precipitation_sum only, no did_rain classifier.
+    parser.add_argument(
+        "--collect-periods", action="store_true", help="[small slice] Collect sub-daily rain forecasts for tomorrow"
+    )
+    parser.add_argument(
+        "--record-actual-periods", action="store_true", help="[small slice] Record yesterday's sub-daily rain actuals"
+    )
+    parser.add_argument(
+        "--backfill-periods", type=int, metavar="DAYS", help="[small slice] Backfill sub-daily rain forecasts and actuals"
+    )
+    parser.add_argument(
+        "--forecast-periods",
+        action="store_true",
+        help="[small slice] Generate weighted-average sub-daily rain forecast for every period",
+    )
+    parser.add_argument(
+        "--train-periods", action="store_true", help="[small slice] Train per-period precipitation models"
+    )
+    parser.add_argument(
+        "--predict-ml-periods",
+        action="store_true",
+        help="[small slice] Predict sub-daily rain using trained per-period models",
+    )
+    parser.add_argument(
+        "--backtest-periods-days",
+        type=int,
+        metavar="DAYS",
+        help="[small slice] Walk-forward: regenerate sub-daily rain ensemble+ML predictions for each "
+        "of the past DAYS days. Needed for the report's ensemble/ML leaderboard entries to have "
+        "anything to show - a live prediction has no actual yet to score against.",
+    )
     return parser
 
 
@@ -256,6 +305,55 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
             _print_json(result)
         ok &= _guarded(location, "backtest", _backtest)
 
+    if args.backfill_periods:
+        def _backfill_periods():
+            backfill_periods(args.db, location, args.backfill_periods)
+            print(f"Backfilled {args.backfill_periods} days of sub-daily rain data for {location.name}")
+        ok &= _guarded(location, "backfill_periods", _backfill_periods)
+
+    if args.collect_periods:
+        def _collect_periods():
+            n = collect_forecast_periods(args.db, location)
+            print(f"Collected {n} sub-daily rain forecast rows")
+        ok &= _guarded(location, "collect_periods", _collect_periods)
+
+    if args.record_actual_periods:
+        def _record_actual_periods():
+            record_actual_periods(args.db, location)
+            print("Recorded yesterday's sub-daily rain actuals")
+        ok &= _guarded(location, "record_actual_periods", _record_actual_periods)
+
+    if args.forecast_periods:
+        for period in PERIODS:
+            def _forecast_period(period=period):
+                result = blend_forecast_period(args.db, location, period, args.window)
+                _print_json(result)
+            ok &= _guarded(location, f"blend_forecast_period[{period}]", _forecast_period)
+
+    if args.train_periods:
+        for period in PERIODS:
+            def _train_period(period=period):
+                result = train_period_model(args.db, location, period, model_dir, window_days=args.train_window)
+                _print_json(result)
+            ok &= _guarded(location, f"train_period[{period}]", _train_period)
+
+    if args.predict_ml_periods:
+        for period in PERIODS:
+            def _predict_ml_period(period=period):
+                result = predict_latest_ml_period(args.db, location, period, model_dir)
+                _print_json(result)
+            ok &= _guarded(location, f"predict_ml_period[{period}]", _predict_ml_period)
+
+    if args.backtest_periods_days:
+        for period in PERIODS:
+            def _backtest_period(period=period):
+                result = backtest_period_predictions(
+                    args.db, location, period, days=args.backtest_periods_days,
+                    ensemble_window_days=args.window, train_window_days=args.train_window,
+                )
+                _print_json(result)
+            ok &= _guarded(location, f"backtest_period[{period}]", _backtest_period)
+
     return ok
 
 
@@ -276,6 +374,13 @@ def main() -> None:
         args.predict_ml,
         args.deploy_phases,
         args.backtest_days,
+        args.backfill_periods,
+        args.collect_periods,
+        args.record_actual_periods,
+        args.forecast_periods,
+        args.train_periods,
+        args.predict_ml_periods,
+        args.backtest_periods_days,
     ]
 
     if not any(per_location_actions) and not args.accuracy_report and not args.dedupe:
@@ -318,9 +423,14 @@ def main() -> None:
         # is a small buffer so the centered rolling-MAE trend has full context
         # right at the edge of that window too, matching what an unbounded
         # read would have produced for every visible date.
-        long_df = build_predictions_long(
-            args.db, locations, window_days=args.report_history_days + args.report_window
-        )
+        window_days = args.report_history_days + args.report_window
+        long_df = build_predictions_long(args.db, locations, window_days=window_days)
+        # Small-slice sub-daily rain: concatenated in as extra synthetic
+        # targets (see build_period_predictions_long's docstring) rather than
+        # given a separate report/rendering path.
+        period_long_df = build_period_predictions_long(args.db, locations, window_days=window_days)
+        if not period_long_df.empty:
+            long_df = pd.concat([long_df, period_long_df], ignore_index=True) if not long_df.empty else period_long_df
         output = build_html_report(
             long_df,
             args.accuracy_report,

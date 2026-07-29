@@ -12,6 +12,7 @@ from weather_ensemble import db
 from weather_ensemble.config import (
     FORECAST_VARIABLES,
     OPEN_METEO_BACKFILL_MODELS,
+    OPEN_METEO_MODELS,
     RAIN_THRESHOLD_MM,
     TARGETS,
     Location,
@@ -92,6 +93,54 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
                 print(f"Backfilled {inserted} rows for open_meteo_{model}")
             except Exception as exc:  # noqa: BLE001 - one bad model shouldn't abort the whole backfill
                 print(f"WARN: historical backfill failed for open_meteo_{model}: {_safe_error(exc)}")
+
+
+def collect_forecast_periods(db_path: Path, location: Location) -> int:
+    """Small-slice sub-daily rain: live collection, every Open-Meteo model.
+
+    Open-Meteo only (not the other 7 providers) - see ForecastPeriodRecord.
+    """
+    records = []
+    for model in OPEN_METEO_MODELS:
+        try:
+            records.extend(open_meteo.fetch_forecast_periods(location, model=model))
+        except Exception as exc:  # noqa: BLE001 - keep collection robust if one model fails
+            print(f"WARN: open_meteo_{model} periods failed: {_safe_error(exc)}")
+
+    with db.connect(db_path) as conn:
+        return db.insert_forecast_periods(conn, records)
+
+
+def record_actual_periods(db_path: Path, location: Location, target_date: date | None = None) -> None:
+    if target_date is None:
+        target_date = local_today(location) - timedelta(days=1)
+    records = open_meteo.fetch_actual_periods(location, target_date)
+    with db.connect(db_path) as conn:
+        for r in records:
+            db.upsert_actual_period(conn, r)
+
+
+def backfill_periods(db_path: Path, location: Location, days_back: int) -> None:
+    """Backfill sub-daily rain: actual_periods plus every backfillable
+    Open-Meteo model's forecast_periods - mirrors backfill() above.
+    """
+    today = local_today(location)
+    with db.connect(db_path) as conn:
+        for i in range(1, days_back + 1):
+            try:
+                records = open_meteo.fetch_actual_periods(location, today - timedelta(days=i))
+                for r in records:
+                    db.upsert_actual_period(conn, r)
+            except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the whole backfill
+                print(f"WARN: actual period backfill failed for day -{i}: {_safe_error(exc)}")
+
+        for model in OPEN_METEO_BACKFILL_MODELS:
+            try:
+                records = open_meteo.fetch_historical_forecast_periods(location, days_back, model=model)
+                inserted = db.insert_forecast_periods(conn, records)
+                print(f"Backfilled {inserted} period rows for open_meteo_{model}")
+            except Exception as exc:  # noqa: BLE001 - one bad model shouldn't abort the whole backfill
+                print(f"WARN: historical period backfill failed for open_meteo_{model}: {_safe_error(exc)}")
 
 
 def load_modelling_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:
@@ -275,6 +324,145 @@ def blend_forecast(db_path: Path, location: Location, window_days: int, target_d
         conn.commit()
 
     return {"forecast_date": target_date.isoformat(), "blended": blended, "metadata": metadata}
+
+
+def load_period_modelling_table(
+    db_path: Path, location: Location, period: str, window_days: int | None = None
+) -> pd.DataFrame:
+    """Small-slice sub-daily rain: forecast_periods joined to actual_periods,
+    scoped to one period - mirrors load_modelling_table, simplified to the
+    one variable (precipitation_sum) periods ever track.
+    """
+    cutoff = "0000-01-01"
+    if window_days:
+        cutoff = (local_today(location) - timedelta(days=window_days)).isoformat()
+
+    with db.connect(db_path) as conn:
+        return pd.read_sql_query(
+            """
+            WITH ranked AS (
+                SELECT *,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY location_name, forecast_date, period, source
+                           ORDER BY CASE WHEN collection_method = 'live' THEN 0 ELSE 1 END,
+                                    collected_at DESC
+                       ) AS rn
+                FROM forecast_periods
+                WHERE location_name = ? AND period = ? AND forecast_date >= ?
+            )
+            SELECT
+                f.source, f.location_name, f.forecast_date, f.period, f.collected_at,
+                f.precipitation_sum, f.rain_probability,
+                a.precipitation_sum AS actual_precipitation_sum, a.did_rain AS actual_did_rain
+            FROM ranked f
+            JOIN actual_periods a
+              ON f.location_name = a.location_name
+             AND f.forecast_date = a.actual_date
+             AND f.period = a.period
+            WHERE f.rn = 1
+            ORDER BY f.forecast_date, f.source
+            """,
+            conn,
+            params=(location.name, period, cutoff),
+        )
+
+
+def compute_period_mae_scores(df: pd.DataFrame) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    if df.empty:
+        return scores
+    for source, source_df in df.groupby("source"):
+        pair = source_df[["precipitation_sum", "actual_precipitation_sum"]].dropna()
+        if not pair.empty:
+            scores[source] = float((pair["precipitation_sum"] - pair["actual_precipitation_sum"]).abs().mean())
+    return scores
+
+
+def latest_forecast_periods_for_date(db_path: Path, location: Location, period: str, target_date: date) -> pd.DataFrame:
+    with db.connect(db_path) as conn:
+        return pd.read_sql_query(
+            """
+            SELECT f.*
+            FROM forecast_periods f
+            JOIN (
+                SELECT source, MAX(collected_at) AS latest_collected_at
+                FROM forecast_periods
+                WHERE location_name = ? AND forecast_date = ? AND period = ?
+                GROUP BY source
+            ) latest
+              ON f.source = latest.source
+             AND f.collected_at = latest.latest_collected_at
+            WHERE f.location_name = ? AND f.forecast_date = ? AND period = ?
+            ORDER BY f.source
+            """,
+            conn,
+            params=(location.name, target_date.isoformat(), period, location.name, target_date.isoformat(), period),
+        )
+
+
+def blend_period_precipitation(forecast_df: pd.DataFrame, scores: dict[str, float]) -> tuple[float | None, dict[str, Any]]:
+    """Inverse-MAE weighted average of precipitation_sum for one (location,
+    date, period) - same weighting formula as blend_weighted, simplified to a
+    single variable since periods only ever predict precipitation.
+    """
+    metadata: dict[str, Any] = {"scores": scores, "sources": forecast_df["source"].tolist()}
+    rows = forecast_df[["source", "precipitation_sum"]].dropna()
+    if rows.empty:
+        return None, metadata
+
+    weighted_sum = 0.0
+    total_weight = 0.0
+    details = []
+    for _, row in rows.iterrows():
+        source = row["source"]
+        prediction = float(row["precipitation_sum"])
+        mae = scores.get(source)
+        weight = 1.0 / mae if mae and mae > 0 else 1.0
+        weighted_sum += prediction * weight
+        total_weight += weight
+        details.append({"source": source, "prediction": prediction, "mae": mae, "weight": weight})
+    metadata["details"] = details
+
+    blended = round(weighted_sum / total_weight, 2) if total_weight else None
+    return blended, metadata
+
+
+def blend_forecast_period(
+    db_path: Path, location: Location, period: str, window_days: int, target_date: date | None = None
+) -> dict[str, Any]:
+    """Blend every source's period forecast for target_date (default: tomorrow) - mirrors blend_forecast."""
+    if target_date is None:
+        target_date = local_today(location) + timedelta(days=1)
+    forecast_df = latest_forecast_periods_for_date(db_path, location, period, target_date)
+    if forecast_df.empty:
+        return {
+            "error": "No forecast periods found. Run collect_forecast_periods first.",
+            "forecast_date": target_date.isoformat(),
+            "period": period,
+        }
+
+    history_df = load_period_modelling_table(db_path, location, period, window_days=window_days)
+    history_df = history_df[pd.to_datetime(history_df["forecast_date"]) < pd.Timestamp(target_date)]
+    scores = compute_period_mae_scores(history_df)
+    blended, metadata = blend_period_precipitation(forecast_df, scores)
+
+    with db.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ensemble_predictions_periods (
+                location_name, lat, lon, forecast_date, period, generated_at, window_days,
+                precipitation_sum, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                location.name, location.lat, location.lon, target_date.isoformat(), period,
+                datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds"), window_days,
+                blended, json.dumps(metadata),
+            ),
+        )
+        conn.commit()
+
+    return {"forecast_date": target_date.isoformat(), "period": period, "precipitation_sum": blended, "metadata": metadata}
 
 
 def export_modelling_table(db_path: Path, location: Location, output_path: Path) -> Path:

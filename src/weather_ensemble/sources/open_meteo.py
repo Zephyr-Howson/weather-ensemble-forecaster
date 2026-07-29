@@ -4,8 +4,20 @@ from datetime import UTC, date, datetime, timedelta
 
 import requests
 
-from weather_ensemble.config import RAIN_THRESHOLD_MM, TIMEOUT_SECONDS, Location, local_today
-from weather_ensemble.models import ActualRecord, ForecastRecord
+from weather_ensemble.config import (
+    PERIOD_HOURS,
+    PERIODS,
+    RAIN_THRESHOLD_MM,
+    TIMEOUT_SECONDS,
+    Location,
+    local_today,
+)
+from weather_ensemble.models import (
+    ActualPeriodRecord,
+    ActualRecord,
+    ForecastPeriodRecord,
+    ForecastRecord,
+)
 from weather_ensemble.retry import get_with_retry
 
 FORECAST_DAILY_FIELDS = [
@@ -60,6 +72,24 @@ def _did_rain(precipitation_sum: float | None) -> int | None:
     if precipitation_sum is None:
         return None
     return int(precipitation_sum >= RAIN_THRESHOLD_MM)
+
+
+def _bucket_hourly_by_period(times: list[str], values: list, target_date: date, agg) -> dict[str, float | None]:
+    """Bucket one day's hourly values into PERIOD_HOURS, in the location's own
+    local time - Open-Meteo's hourly `time` array is already location-local
+    since every request here passes `timezone=location.timezone`, so the hour
+    can be read directly off the timestamp string with no conversion.
+    """
+    buckets: dict[str, list[float]] = {period: [] for period in PERIODS}
+    for time_str, value in zip(times, values, strict=False):
+        if value is None or not time_str.startswith(target_date.isoformat()):
+            continue
+        hour = int(time_str[11:13])
+        for period, (start, end) in PERIOD_HOURS.items():
+            if start <= hour < end:
+                buckets[period].append(float(value))
+                break
+    return {period: agg(vals) if vals else None for period, vals in buckets.items()}
 
 
 def fetch_forecast(location: Location, model: str = "best_match") -> ForecastRecord:
@@ -146,6 +176,91 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
     )
 
 
+def fetch_forecast_periods(location: Location, model: str = "best_match") -> list[ForecastPeriodRecord]:
+    """Small-slice sub-daily rain forecast: tomorrow's precipitation, bucketed
+    into morning/afternoon/evening. A separate API call from fetch_forecast
+    rather than folding into it - Open-Meteo's free tier has no meaningful
+    rate limit, and keeping this isolated means fetch_forecast's existing
+    behavior (used by every call site) doesn't change at all.
+    """
+    url = "https://api.open-meteo.com/v1/forecast"
+    params = {
+        "latitude": location.lat,
+        "longitude": location.lon,
+        "daily": "temperature_2m_max",
+        "hourly": "precipitation,precipitation_probability",
+        "timezone": location.timezone,
+        "forecast_days": 3,
+        "models": model,
+    }
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
+    payload = response.json()
+    daily = payload["daily"]
+    hourly = payload.get("hourly", {})
+    target_date = date.fromisoformat(daily["time"][1])
+    collected_at = datetime.now(UTC).replace(tzinfo=None)
+
+    times = hourly.get("time", [])
+    precip_by_period = _bucket_hourly_by_period(
+        times, hourly.get("precipitation", []), target_date, lambda vals: round(sum(vals), 3)
+    )
+    prob_by_period = _bucket_hourly_by_period(times, hourly.get("precipitation_probability", []), target_date, max)
+
+    return [
+        ForecastPeriodRecord(
+            source=f"open_meteo_{model}",
+            location_name=location.name,
+            lat=location.lat,
+            lon=location.lon,
+            forecast_date=target_date,
+            period=period,
+            collected_at=collected_at,
+            precipitation_sum=precip_by_period[period],
+            rain_probability=prob_by_period[period],
+        )
+        for period in PERIODS
+    ]
+
+
+def fetch_actual_periods(location: Location, target_date: date) -> list[ActualPeriodRecord]:
+    """Small-slice sub-daily rain ground truth: observed precipitation for
+    target_date, bucketed into morning/afternoon/evening, from Open-Meteo's
+    archive API (real historical observations, not a forecast).
+    """
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        "latitude": location.lat,
+        "longitude": location.lon,
+        "start_date": target_date.isoformat(),
+        "end_date": target_date.isoformat(),
+        "hourly": "precipitation",
+        "timezone": location.timezone,
+    }
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
+    payload = response.json()
+    hourly = payload.get("hourly", {})
+    collected_at = datetime.now(UTC).replace(tzinfo=None)
+
+    precip_by_period = _bucket_hourly_by_period(
+        hourly.get("time", []), hourly.get("precipitation", []), target_date, lambda vals: round(sum(vals), 3)
+    )
+
+    return [
+        ActualPeriodRecord(
+            source="open_meteo_archive",
+            location_name=location.name,
+            lat=location.lat,
+            lon=location.lon,
+            actual_date=target_date,
+            period=period,
+            collected_at=collected_at,
+            precipitation_sum=precip_by_period[period],
+            did_rain=_did_rain(precip_by_period[period]),
+        )
+        for period in PERIODS
+    ]
+
+
 def fetch_historical_forecasts(location: Location, days_back: int, model: str = "best_match") -> list[ForecastRecord]:
     """Backfill archived model forecasts, not observations."""
     today = local_today(location)
@@ -221,4 +336,77 @@ def fetch_historical_forecasts(location: Location, days_back: int, model: str = 
                 collection_method="backfill",
             )
         )
+    return records
+
+
+def fetch_historical_forecast_periods(location: Location, days_back: int, model: str = "best_match") -> list[ForecastPeriodRecord]:
+    """Backfill archived per-period precipitation - same endpoint-fallback
+    pattern as fetch_historical_forecasts. Only precipitation_sum, not
+    rain_probability: hourly probability isn't reliably available on the
+    historical-forecast/past-days endpoints the way it is on the live
+    forecast one, and probability is only ever a candidate ML feature here,
+    never the regression target, so it's not worth the uncertainty.
+    """
+    today = local_today(location)
+    start = today - timedelta(days=days_back)
+    end = today - timedelta(days=1)
+    params = {
+        "latitude": location.lat,
+        "longitude": location.lon,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "hourly": "precipitation",
+        "timezone": location.timezone,
+        "models": model,
+    }
+
+    endpoints = [
+        "https://historical-forecast-api.open-meteo.com/v1/forecast",
+        "https://api.open-meteo.com/v1/forecast",
+    ]
+
+    payload = None
+    last_error: Exception | None = None
+    for url in endpoints:
+        request_params = dict(params)
+        if "api.open-meteo.com" in url:
+            request_params.pop("start_date", None)
+            request_params.pop("end_date", None)
+            request_params["past_days"] = days_back
+            request_params["forecast_days"] = 1
+        try:
+            response = get_with_retry(url, params=request_params, timeout=TIMEOUT_SECONDS)
+            payload = response.json()
+            break
+        except (requests.RequestException, ValueError) as exc:  # pragma: no cover
+            last_error = exc
+
+    if payload is None:
+        raise RuntimeError(f"Could not fetch historical forecast periods: {last_error}")
+
+    hourly = payload.get("hourly", {})
+    times = hourly.get("time", [])
+    values = hourly.get("precipitation", [])
+
+    records: list[ForecastPeriodRecord] = []
+    day = start
+    while day < today:
+        precip_by_period = _bucket_hourly_by_period(times, values, day, lambda vals: round(sum(vals), 3))
+        collected_at = datetime.combine(day - timedelta(days=1), datetime.min.time()).replace(hour=21)
+        for period in PERIODS:
+            records.append(
+                ForecastPeriodRecord(
+                    source=f"open_meteo_{model}",
+                    location_name=location.name,
+                    lat=location.lat,
+                    lon=location.lon,
+                    forecast_date=day,
+                    period=period,
+                    collected_at=collected_at,
+                    precipitation_sum=precip_by_period[period],
+                    rain_probability=None,
+                    collection_method="backfill",
+                )
+            )
+        day += timedelta(days=1)
     return records

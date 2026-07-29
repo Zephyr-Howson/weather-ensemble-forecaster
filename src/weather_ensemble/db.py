@@ -5,7 +5,12 @@ import sqlite3
 from collections.abc import Iterable
 from pathlib import Path
 
-from weather_ensemble.models import ActualRecord, ForecastRecord
+from weather_ensemble.models import (
+    ActualPeriodRecord,
+    ActualRecord,
+    ForecastPeriodRecord,
+    ForecastRecord,
+)
 
 FORECAST_COLUMNS = [
     "source", "location_name", "lat", "lon", "forecast_date", "collected_at",
@@ -19,6 +24,24 @@ ACTUAL_COLUMNS = [
     "max_temp", "min_temp", "precipitation_sum", "did_rain",
     "wind_speed", "wind_gusts", "cloud_cover", "humidity", "pressure_msl",
     "weather_code", "raw_json",
+]
+
+# Small-slice sub-daily rain prediction (morning/afternoon/evening) - see
+# ForecastPeriodRecord/ActualPeriodRecord. Deliberately separate tables rather
+# than more columns on the four above: those are already wide enough that a
+# column/placeholder-count mismatch has bitten this project once before
+# (backtest.py's INSERT), and period data doesn't apply to most of their
+# existing columns (temp, wind, etc.) anyway. No raw_json here - it would just
+# be the same full hourly payload duplicated 3x per source per day; the
+# parent forecasts/actuals row already has it.
+FORECAST_PERIOD_COLUMNS = [
+    "source", "location_name", "lat", "lon", "forecast_date", "period", "collected_at",
+    "precipitation_sum", "rain_probability", "collection_method",
+]
+
+ACTUAL_PERIOD_COLUMNS = [
+    "source", "location_name", "lat", "lon", "actual_date", "period", "collected_at",
+    "precipitation_sum", "did_rain",
 ]
 
 
@@ -140,6 +163,69 @@ def init_db(conn: sqlite3.Connection) -> None:
             metadata_json TEXT,
             UNIQUE(location_name, forecast_date, generated_at)
         );
+
+        CREATE TABLE IF NOT EXISTS forecast_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            location_name TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            forecast_date TEXT NOT NULL,
+            period TEXT NOT NULL,
+            collected_at TEXT NOT NULL,
+            precipitation_sum REAL,
+            rain_probability REAL,
+            collection_method TEXT,
+            UNIQUE(source, location_name, forecast_date, period, collected_at)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_forecast_periods_lookup
+            ON forecast_periods(location_name, forecast_date, period, source);
+
+        CREATE TABLE IF NOT EXISTS actual_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            location_name TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            actual_date TEXT NOT NULL,
+            period TEXT NOT NULL,
+            collected_at TEXT NOT NULL,
+            precipitation_sum REAL,
+            did_rain INTEGER,
+            UNIQUE(source, location_name, actual_date, period)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_actual_periods_lookup
+            ON actual_periods(location_name, actual_date, period, source);
+
+        CREATE TABLE IF NOT EXISTS ensemble_predictions_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location_name TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            forecast_date TEXT NOT NULL,
+            period TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            window_days INTEGER NOT NULL,
+            precipitation_sum REAL,
+            metadata_json TEXT,
+            UNIQUE(location_name, forecast_date, period, generated_at)
+        );
+
+        CREATE TABLE IF NOT EXISTS ml_predictions_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location_name TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            forecast_date TEXT NOT NULL,
+            period TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            model_version TEXT NOT NULL,
+            precipitation_sum REAL,
+            metadata_json TEXT,
+            UNIQUE(location_name, forecast_date, period, generated_at)
+        );
         """
     )
 
@@ -226,6 +312,47 @@ def upsert_actual(conn: sqlite3.Connection, r: ActualRecord) -> None:
             r.precipitation_sum, r.did_rain, r.wind_speed, r.wind_gusts,
             r.cloud_cover, r.humidity, r.pressure_msl, r.weather_code,
             json.dumps(r.raw_json or {}),
+        ),
+    )
+    conn.commit()
+
+
+def insert_forecast_periods(conn: sqlite3.Connection, records: Iterable[ForecastPeriodRecord]) -> int:
+    inserted = 0
+    placeholders = ", ".join("?" for _ in FORECAST_PERIOD_COLUMNS)
+    column_list = ", ".join(FORECAST_PERIOD_COLUMNS)
+    for r in records:
+        values = (
+            r.source, r.location_name, r.lat, r.lon, r.forecast_date.isoformat(), r.period,
+            r.collected_at.isoformat(timespec="seconds"),
+            r.precipitation_sum, r.rain_probability, r.collection_method,
+        )
+        cur = conn.execute(
+            f"INSERT OR IGNORE INTO forecast_periods ({column_list}) VALUES ({placeholders})",
+            values,
+        )
+        inserted += cur.rowcount
+    conn.commit()
+    return inserted
+
+
+def upsert_actual_period(conn: sqlite3.Connection, r: ActualPeriodRecord) -> None:
+    conn.execute(
+        """
+        INSERT INTO actual_periods (
+            source, location_name, lat, lon, actual_date, period, collected_at,
+            precipitation_sum, did_rain
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(source, location_name, actual_date, period)
+        DO UPDATE SET
+            collected_at=excluded.collected_at,
+            precipitation_sum=excluded.precipitation_sum,
+            did_rain=excluded.did_rain
+        """,
+        (
+            r.source, r.location_name, r.lat, r.lon, r.actual_date.isoformat(), r.period,
+            r.collected_at.isoformat(timespec="seconds"),
+            r.precipitation_sum, r.did_rain,
         ),
     )
     conn.commit()

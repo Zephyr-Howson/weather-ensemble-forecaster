@@ -44,6 +44,17 @@ TARGETS: dict[str, str] = {
 RAIN_THRESHOLD_MM = float(os.getenv("RAIN_THRESHOLD_MM", "0.2"))
 TIMEOUT_SECONDS = 15
 
+# Sub-daily rain prediction (small slice, precipitation only - see
+# ForecastPeriodRecord). Hour ranges are the location's local hour-of-day,
+# end-exclusive: morning is [6, 12), afternoon is [12, 18), evening is
+# [18, 24). Hours 0-6 (overnight) are deliberately out of scope for now.
+PERIOD_HOURS: dict[str, tuple[int, int]] = {
+    "morning": (6, 12),
+    "afternoon": (12, 18),
+    "evening": (18, 24),
+}
+PERIODS: list[str] = list(PERIOD_HOURS)
+
 # Open-Meteo model suite used as the first serious ensemble.
 # These are separate numerical weather prediction systems exposed through
 # Open-Meteo and can be backfilled through the Historical Forecast API.

@@ -9,7 +9,7 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from weather_ensemble import db
-from weather_ensemble.config import AUSTRALIAN_LOCATIONS, TARGETS, Location
+from weather_ensemble.config import AUSTRALIAN_LOCATIONS, PERIODS, TARGETS, Location
 from weather_ensemble.scoring import (
     BASELINE_CLIMATOLOGY,
     BASELINE_PERSISTENCE,
@@ -71,6 +71,12 @@ TARGET_LABELS = {
     "humidity": "Humidity",
     "pressure_msl": "Pressure (MSL)",
 }
+
+# Small-slice sub-daily rain prediction - synthetic per-period target names
+# (see scoring.build_period_predictions_long's docstring for why these are
+# just extra "target" values rather than a separate rendering path).
+PERIOD_TARGETS = [f"precipitation_sum_{period}" for period in PERIODS]
+TARGET_LABELS.update({f"precipitation_sum_{period}": f"Precipitation — {period.capitalize()}" for period in PERIODS})
 
 RECENT_DAYS_COUNT = 5
 RECENT_TARGETS = list(TARGETS)
@@ -797,6 +803,7 @@ def build_html_report(
     board = leaderboard(long_df, recent_days=recent_days)
     trend = rolling_error_over_time(long_df, window=rolling_window)
     targets = [t for t in TARGETS if t in long_df["target"].unique()]
+    targets += [t for t in PERIOD_TARGETS if t in long_df["target"].unique()]
     raw_colors = _raw_source_colors(
         {m for m in long_df["model"].unique() if m not in HERO_STYLE and m not in BASELINE_STYLE}
     )

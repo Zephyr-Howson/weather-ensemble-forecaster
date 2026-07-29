@@ -6,8 +6,8 @@ from pathlib import Path
 import pandas as pd
 
 from weather_ensemble import db
-from weather_ensemble.config import RAIN_THRESHOLD_MM, TARGETS, Location, local_today
-from weather_ensemble.service import load_modelling_table
+from weather_ensemble.config import PERIODS, RAIN_THRESHOLD_MM, TARGETS, Location, local_today
+from weather_ensemble.service import load_modelling_table, load_period_modelling_table
 
 BASELINE_PERSISTENCE = "baseline_persistence"
 BASELINE_CLIMATOLOGY = "baseline_climatology"
@@ -228,6 +228,198 @@ def build_predictions_long(db_path: Path, locations: list[Location], window_days
         rows.extend(_ensemble_predictions(db_path, location, window_days=window_days))
         rows.extend(_ml_predictions(db_path, location, window_days=window_days))
         rows.extend(_baseline_predictions(db_path, location, window_days=window_days))
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["forecast_date"] = pd.to_datetime(df["forecast_date"])
+    df["abs_error"] = (df["predicted"] - df["actual"]).abs()
+    df["error"] = df["predicted"] - df["actual"]
+    return df
+
+
+def _source_predictions_period(
+    db_path: Path, location: Location, period: str, window_days: int | None = None
+) -> list[dict]:
+    wide = load_period_modelling_table(db_path, location, period, window_days=window_days)
+    if wide.empty:
+        return []
+    target = f"precipitation_sum_{period}"
+    rows: list[dict] = []
+    for _, r in wide.iterrows():
+        actual = r.get("actual_precipitation_sum")
+        predicted = r.get("precipitation_sum")
+        if pd.isna(actual) or pd.isna(predicted):
+            continue
+        rows.append(
+            {
+                "model": r["source"],
+                "location_name": r["location_name"],
+                "forecast_date": r["forecast_date"],
+                "target": target,
+                "predicted": float(predicted),
+                "actual": float(actual),
+            }
+        )
+    return rows
+
+
+def _ensemble_predictions_period(
+    db_path: Path, location: Location, period: str, window_days: int | None = None
+) -> list[dict]:
+    cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
+    with db.connect(db_path) as conn:
+        wide = pd.read_sql_query(
+            """
+            WITH latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY location_name, forecast_date, period ORDER BY generated_at DESC
+                ) AS rn
+                FROM ensemble_predictions_periods
+                WHERE location_name = ? AND period = ? AND forecast_date >= ?
+            )
+            SELECT e.location_name, e.forecast_date, e.precipitation_sum,
+                   a.precipitation_sum AS actual_precipitation_sum
+            FROM latest e
+            JOIN actual_periods a
+              ON a.location_name = e.location_name AND a.actual_date = e.forecast_date AND a.period = ?
+            WHERE e.rn = 1
+            """,
+            conn,
+            params=(location.name, period, cutoff, period),
+        )
+    if wide.empty:
+        return []
+    target = f"precipitation_sum_{period}"
+    rows: list[dict] = []
+    for _, r in wide.iterrows():
+        if pd.isna(r["precipitation_sum"]) or pd.isna(r["actual_precipitation_sum"]):
+            continue
+        rows.append(
+            {
+                "model": MODEL_ENSEMBLE,
+                "location_name": r["location_name"],
+                "forecast_date": r["forecast_date"],
+                "target": target,
+                "predicted": float(r["precipitation_sum"]),
+                "actual": float(r["actual_precipitation_sum"]),
+            }
+        )
+    return rows
+
+
+def _ml_predictions_period(
+    db_path: Path, location: Location, period: str, window_days: int | None = None
+) -> list[dict]:
+    cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
+    with db.connect(db_path) as conn:
+        wide = pd.read_sql_query(
+            """
+            WITH latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY location_name, forecast_date, period ORDER BY generated_at DESC
+                ) AS rn
+                FROM ml_predictions_periods
+                WHERE location_name = ? AND period = ? AND forecast_date >= ?
+            )
+            SELECT m.location_name, m.forecast_date, m.precipitation_sum,
+                   a.precipitation_sum AS actual_precipitation_sum
+            FROM latest m
+            JOIN actual_periods a
+              ON a.location_name = m.location_name AND a.actual_date = m.forecast_date AND a.period = ?
+            WHERE m.rn = 1
+            """,
+            conn,
+            params=(location.name, period, cutoff, period),
+        )
+    if wide.empty:
+        return []
+    target = f"precipitation_sum_{period}"
+    rows: list[dict] = []
+    for _, r in wide.iterrows():
+        if pd.isna(r["precipitation_sum"]) or pd.isna(r["actual_precipitation_sum"]):
+            continue
+        rows.append(
+            {
+                "model": MODEL_ML,
+                "location_name": r["location_name"],
+                "forecast_date": r["forecast_date"],
+                "target": target,
+                "predicted": float(r["precipitation_sum"]),
+                "actual": float(r["actual_precipitation_sum"]),
+            }
+        )
+    return rows
+
+
+def _baseline_predictions_period(
+    db_path: Path,
+    location: Location,
+    period: str,
+    climatology_window: int = 30,
+    climatology_min_periods: int = 7,
+    window_days: int | None = None,
+) -> list[dict]:
+    """Persistence/climatology baselines from actual_periods history - mirrors _baseline_predictions."""
+    visible_cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else None
+    fetch_cutoff = (
+        (local_today(location) - timedelta(days=window_days + climatology_window)).isoformat()
+        if window_days
+        else "0000-01-01"
+    )
+    with db.connect(db_path) as conn:
+        actuals = pd.read_sql_query(
+            "SELECT location_name, actual_date, precipitation_sum FROM actual_periods "
+            "WHERE location_name = ? AND period = ? AND actual_date >= ? ORDER BY actual_date",
+            conn,
+            params=(location.name, period, fetch_cutoff),
+        )
+    if actuals.empty:
+        return []
+
+    target = f"precipitation_sum_{period}"
+    series = actuals["precipitation_sum"].astype(float)
+    persistence = series.shift(1)
+    climatology = series.rolling(window=climatology_window, min_periods=climatology_min_periods).mean().shift(1)
+
+    rows: list[dict] = []
+    for model, predicted_series in ((BASELINE_PERSISTENCE, persistence), (BASELINE_CLIMATOLOGY, climatology)):
+        for idx, predicted in predicted_series.items():
+            actual = series.iloc[idx]
+            if pd.isna(predicted) or pd.isna(actual):
+                continue
+            forecast_date = actuals["actual_date"].iloc[idx]
+            if visible_cutoff is not None and forecast_date < visible_cutoff:
+                continue
+            rows.append(
+                {
+                    "model": model,
+                    "location_name": location.name,
+                    "forecast_date": forecast_date,
+                    "target": target,
+                    "predicted": float(predicted),
+                    "actual": float(actual),
+                }
+            )
+    return rows
+
+
+def build_period_predictions_long(db_path: Path, locations: list[Location], window_days: int | None = None) -> pd.DataFrame:
+    """Small-slice sub-daily rain: mirrors build_predictions_long, one
+    synthetic target per period ("precipitation_sum_morning" etc.) instead of
+    the daily TARGETS set. The existing report renderer is fully generic over
+    `target` strings, so concatenating this with the daily long_df and adding
+    these names to the target list (report.py) is enough to display them -
+    no changes needed to leaderboard()/rolling_error_over_time() or any
+    chart-building code below.
+    """
+    rows: list[dict] = []
+    for location in locations:
+        for period in PERIODS:
+            rows.extend(_source_predictions_period(db_path, location, period, window_days=window_days))
+            rows.extend(_ensemble_predictions_period(db_path, location, period, window_days=window_days))
+            rows.extend(_ml_predictions_period(db_path, location, period, window_days=window_days))
+            rows.extend(_baseline_predictions_period(db_path, location, period, window_days=window_days))
 
     df = pd.DataFrame(rows)
     if df.empty:

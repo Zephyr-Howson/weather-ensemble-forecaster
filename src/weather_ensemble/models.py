@@ -55,3 +55,36 @@ class ActualRecord:
         did_rain and precipitation_sum for verification and model targets.
         """
         return None
+
+
+@dataclass(frozen=True)
+class ForecastPeriodRecord:
+    """One source's sub-daily (morning/afternoon/evening) rain forecast.
+
+    Deliberately narrower than ForecastRecord - period breakdowns only exist
+    for precipitation, not every daily field.
+    """
+
+    source: str
+    location_name: str
+    lat: float
+    lon: float
+    forecast_date: date
+    period: str
+    collected_at: datetime
+    precipitation_sum: float | None = None
+    rain_probability: float | None = None
+    collection_method: str = "live"
+
+
+@dataclass(frozen=True)
+class ActualPeriodRecord:
+    source: str
+    location_name: str
+    lat: float
+    lon: float
+    actual_date: date
+    period: str
+    collected_at: datetime
+    precipitation_sum: float | None = None
+    did_rain: int | None = None

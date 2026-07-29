@@ -20,7 +20,14 @@ from weather_ensemble.ml import (
     clip_prediction,
     features_for_target,
 )
-from weather_ensemble.service import blend_weighted, compute_mae_scores, load_modelling_table
+from weather_ensemble.service import (
+    blend_period_precipitation,
+    blend_weighted,
+    compute_mae_scores,
+    compute_period_mae_scores,
+    load_modelling_table,
+    load_period_modelling_table,
+)
 
 BACKTEST_MODEL_VERSION = f"backtest-{MODEL_VERSION}"
 MIN_TRAIN_ROWS = 30
@@ -28,6 +35,13 @@ MIN_TRAIN_ROWS = 30
 
 def _existing_forecast_dates(conn: sqlite3.Connection, table: str, location: Location) -> set[str]:
     rows = conn.execute(f"SELECT DISTINCT forecast_date FROM {table} WHERE location_name = ?", (location.name,))
+    return {r[0] for r in rows}
+
+
+def _existing_forecast_dates_period(conn: sqlite3.Connection, table: str, location: Location, period: str) -> set[str]:
+    rows = conn.execute(
+        f"SELECT DISTINCT forecast_date FROM {table} WHERE location_name = ? AND period = ?", (location.name, period)
+    )
     return {r[0] for r in rows}
 
 
@@ -153,6 +167,153 @@ def _backtest_ml(
         ),
     )
     return "written"
+
+
+def _backtest_ensemble_period(
+    conn: sqlite3.Connection,
+    location: Location,
+    period: str,
+    long_df: pd.DataFrame,
+    target_date,
+    window_days: int,
+    existing: set[str],
+) -> str:
+    d_iso = target_date.isoformat()
+    if d_iso in existing:
+        return "skipped_existing"
+
+    forecast_rows = long_df[long_df["forecast_date"] == pd.Timestamp(target_date)]
+    if forecast_rows.empty:
+        return "skipped_no_forecast"
+
+    history = long_df[
+        (long_df["forecast_date"] < pd.Timestamp(target_date))
+        & (long_df["forecast_date"] >= pd.Timestamp(target_date) - pd.Timedelta(days=window_days))
+    ]
+    scores = compute_period_mae_scores(history)
+    blended, metadata = blend_period_precipitation(forecast_rows, scores)
+    metadata["backtest"] = True
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO ensemble_predictions_periods (
+            location_name, lat, lon, forecast_date, period, generated_at, window_days,
+            precipitation_sum, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            location.name, location.lat, location.lon, d_iso, period,
+            _generated_at_for(target_date), window_days, blended, json.dumps(metadata),
+        ),
+    )
+    return "written"
+
+
+def _backtest_ml_period(
+    conn: sqlite3.Connection,
+    location: Location,
+    period: str,
+    wide_all: pd.DataFrame,
+    target_date,
+    train_window_days: int,
+    existing: set[str],
+) -> str:
+    d_iso = target_date.isoformat()
+    if d_iso in existing:
+        return "skipped_existing"
+
+    predict_row = wide_all[wide_all["forecast_date"] == pd.Timestamp(target_date)]
+    if predict_row.empty:
+        return "skipped_no_forecast"
+
+    train_df = wide_all[
+        (wide_all["forecast_date"] < pd.Timestamp(target_date))
+        & (wide_all["forecast_date"] >= pd.Timestamp(target_date) - pd.Timedelta(days=train_window_days))
+    ]
+
+    target_col = "actual_precipitation_sum"
+    if target_col not in train_df.columns:
+        return "skipped_no_forecast"
+    features = features_for_target(train_df, "precipitation_sum")
+    if not features:
+        return "skipped_no_forecast"
+    data = train_df[features + [target_col]].dropna(subset=[target_col])
+    if len(data) < MIN_TRAIN_ROWS:
+        return "skipped_insufficient_data"
+
+    X, y = data[features], data[target_col]
+    model_type, model = _make_model("precipitation_sum")
+    model.fit(X, y)
+    X_pred = predict_row.reindex(columns=features)
+    prediction = round(clip_prediction("precipitation_sum", float(model.predict(X_pred)[0])), 2)
+    metadata = {"backtest": True, "precipitation_sum": {"model_type": model_type, "train_rows": len(data)}}
+
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO ml_predictions_periods (
+            location_name, lat, lon, forecast_date, period, generated_at, model_version,
+            precipitation_sum, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            location.name, location.lat, location.lon, d_iso, period,
+            _generated_at_for(target_date), BACKTEST_MODEL_VERSION, prediction, json.dumps(metadata),
+        ),
+    )
+    return "written"
+
+
+def backtest_period_predictions(
+    db_path: Path,
+    location: Location,
+    period: str,
+    days: int,
+    ensemble_window_days: int = 30,
+    train_window_days: int = 90,
+) -> dict[str, Any]:
+    """Small-slice sub-daily rain: mirrors backtest_predictions, one period +
+    precipitation_sum only. Needed for the report's ensemble/ML leaderboard
+    entries to have anything to show at all - a live "tomorrow" prediction
+    has no actual yet to score against, so without walk-forward historical
+    predictions like these, the report's period cards can only ever show raw
+    source accuracy, never ensemble/ML (a real gap found by checking the
+    freshly-built report cards, not assumed away).
+    """
+    long_df = load_period_modelling_table(db_path, location, period)
+    if long_df.empty:
+        return {"location": location.name, "period": period, "error": "No modelling rows available."}
+    long_df = long_df.copy()
+    long_df["forecast_date"] = pd.to_datetime(long_df["forecast_date"])
+
+    max_date = long_df["forecast_date"].max().date()
+    target_dates = sorted(max_date - timedelta(days=i) for i in range(days))
+
+    wide_all = _build_wide_feature_table(long_df, include_targets=True)
+
+    with db.connect(db_path) as conn:
+        existing_ensemble = _existing_forecast_dates_period(conn, "ensemble_predictions_periods", location, period)
+        existing_ml = _existing_forecast_dates_period(conn, "ml_predictions_periods", location, period)
+
+        ensemble_results: dict[str, list[str]] = {}
+        ml_results: dict[str, list[str]] = {}
+        for target_date in target_dates:
+            outcome = _backtest_ensemble_period(
+                conn, location, period, long_df, target_date, ensemble_window_days, existing_ensemble
+            )
+            ensemble_results.setdefault(outcome, []).append(target_date.isoformat())
+
+            outcome = _backtest_ml_period(conn, location, period, wide_all, target_date, train_window_days, existing_ml)
+            ml_results.setdefault(outcome, []).append(target_date.isoformat())
+
+        conn.commit()
+
+    return {
+        "location": location.name,
+        "period": period,
+        "date_range": [target_dates[0].isoformat(), target_dates[-1].isoformat()],
+        "ensemble": {k: len(v) for k, v in ensemble_results.items()},
+        "ml": {k: len(v) for k, v in ml_results.items()},
+    }
 
 
 def backtest_predictions(

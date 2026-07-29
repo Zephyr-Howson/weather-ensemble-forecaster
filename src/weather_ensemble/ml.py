@@ -17,7 +17,12 @@ from sklearn.pipeline import Pipeline
 
 from weather_ensemble import db
 from weather_ensemble.config import FORECAST_VARIABLES, TARGETS, Location
-from weather_ensemble.service import latest_forecasts_for_date, load_modelling_table
+from weather_ensemble.service import (
+    latest_forecast_periods_for_date,
+    latest_forecasts_for_date,
+    load_modelling_table,
+    load_period_modelling_table,
+)
 
 TARGET_MAP = {target: f"actual_{target}" for target in TARGETS}
 CLASSIFICATION_TARGETS = {"did_rain"}
@@ -297,6 +302,140 @@ def train_models(
 def load_model_bundle(model_dir: Path, target: str) -> TrainedModelBundle:
     with (model_dir / f"{target}.pkl").open("rb") as f:
         return pickle.load(f)
+
+
+def build_period_feature_table(
+    db_path: Path, location: Location, period: str, window_days: int | None = None
+) -> pd.DataFrame:
+    """Small-slice sub-daily rain: mirrors build_feature_table, one period at
+    a time. Reuses _build_wide_feature_table as-is - it already skips any
+    FORECAST_VARIABLES entry not present in the input, and precipitation_sum
+    (the only variable period data carries) is also a daily TARGETS entry, so
+    the existing include_targets base-column logic picks up
+    actual_precipitation_sum/actual_did_rain with no changes needed.
+    """
+    long_df = load_period_modelling_table(db_path, location, period, window_days=window_days)
+    return _build_wide_feature_table(long_df, include_targets=True)
+
+
+def build_period_prediction_feature_table(
+    db_path: Path, location: Location, period: str, target_date: date | None = None
+) -> pd.DataFrame:
+    """Mirrors build_prediction_feature_table, one period at a time."""
+    if target_date is None:
+        target_date = datetime.now(ZoneInfo(location.timezone)).date() + timedelta(days=1)
+    long_df = latest_forecast_periods_for_date(db_path, location, period, target_date)
+    return _build_wide_feature_table(long_df, include_targets=False)
+
+
+def train_period_model(
+    db_path: Path,
+    location: Location,
+    period: str,
+    output_dir: Path,
+    min_rows: int = 30,
+    test_size: float = 0.25,
+    window_days: int | None = None,
+) -> dict[str, Any]:
+    """Small-slice sub-daily rain: a single precipitation_sum Ridge model per
+    (location, period) - mirrors train_models, narrowed to one target since
+    that's the only thing period data predicts so far.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    df = build_period_feature_table(db_path, location, period, window_days=window_days)
+    if df.empty:
+        return {"error": "No modelling rows available. Run backfill_periods first.", "period": period}
+
+    target_col = "actual_precipitation_sum"
+    if target_col not in df.columns:
+        return {"error": f"Missing {target_col}.", "period": period}
+
+    features = features_for_target(df, "precipitation_sum")
+    if not features:
+        return {"error": "No feature columns available for 'precipitation_sum'.", "period": period}
+
+    data = df[features + [target_col]].dropna(subset=[target_col])
+    if len(data) < min_rows:
+        return {"error": f"Need at least {min_rows} rows, only found {len(data)}.", "period": period}
+
+    X, y = data[features], data[target_col]
+    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size, shuffle=False)
+
+    model_type, model = _make_model("precipitation_sum")
+    model.fit(X_train, y_train)
+
+    preds = [clip_prediction("precipitation_sum", p) for p in model.predict(X_test)]
+    metrics = {
+        "mae": float(mean_absolute_error(y_test, preds)),
+        "rmse": float(mean_squared_error(y_test, preds) ** 0.5),
+        "train_rows": len(X_train),
+        "test_rows": len(X_test),
+    }
+    trained_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
+
+    bundle = TrainedModelBundle(
+        target="precipitation_sum", features=features, model=model,
+        metrics=metrics, trained_at=trained_at, model_type=model_type,
+    )
+    with (output_dir / f"precipitation_sum_{period}.pkl").open("wb") as f:
+        pickle.dump(bundle, f)
+
+    return {
+        "model_version": MODEL_VERSION,
+        "location": location.name,
+        "period": period,
+        "rows_available": len(df),
+        "trained_at": trained_at,
+        "status": "trained",
+        "model_type": model_type,
+        "feature_count": len(features),
+        **metrics,
+    }
+
+
+def predict_latest_ml_period(
+    db_path: Path, location: Location, period: str, model_dir: Path, target_date: date | None = None
+) -> dict[str, Any]:
+    """Mirrors predict_latest_ml, narrowed to the single precipitation_sum-per-period model."""
+    df = build_period_prediction_feature_table(db_path, location, period, target_date=target_date)
+    if df.empty:
+        return {"error": "No forecast periods found. Run collect_forecast_periods first.", "period": period}
+
+    model_path = model_dir / f"precipitation_sum_{period}.pkl"
+    if not model_path.exists():
+        return {"error": "No trained model found. Run train_period_model first.", "period": period}
+
+    latest = df.sort_values("forecast_date").tail(1)
+    forecast_date = latest["forecast_date"].iloc[0].date().isoformat()
+
+    with model_path.open("rb") as f:
+        bundle: TrainedModelBundle = pickle.load(f)
+
+    X = latest.reindex(columns=bundle.features)
+    X = _fill_missing_sources_from_row_median(X, latest, "precipitation_sum")
+    prediction = round(clip_prediction("precipitation_sum", float(bundle.model.predict(X)[0])), 2)
+    metadata = {"precipitation_sum": {"model_type": bundle.model_type, **bundle.metrics}}
+
+    generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
+    with db.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO ml_predictions_periods (
+                location_name, lat, lon, forecast_date, period, generated_at, model_version,
+                precipitation_sum, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                location.name, location.lat, location.lon, forecast_date, period,
+                generated_at, MODEL_VERSION, prediction, json.dumps(metadata),
+            ),
+        )
+        conn.commit()
+
+    return {
+        "forecast_date": forecast_date, "period": period, "model_version": MODEL_VERSION,
+        "precipitation_sum": prediction, "metadata": metadata,
+    }
 
 
 def _fill_missing_sources_from_row_median(X: pd.DataFrame, raw: pd.DataFrame, var: str) -> pd.DataFrame:
