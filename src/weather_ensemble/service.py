@@ -13,6 +13,7 @@ from weather_ensemble.config import (
     FORECAST_VARIABLES,
     OPEN_METEO_BACKFILL_MODELS,
     OPEN_METEO_MODELS,
+    PERIODS,
     RAIN_THRESHOLD_MM,
     TARGETS,
     Location,
@@ -72,14 +73,20 @@ def record_actual(db_path: Path, location: Location, target_date: date | None = 
 
 
 def backfill(db_path: Path, location: Location, days_back: int) -> None:
-    """Backfill actuals plus all configured Open-Meteo historical forecasts.
+    """Backfill actuals plus all configured Open-Meteo historical forecasts,
+    daily and sub-daily rain periods together.
 
+    Merged into one pass per model (one API call each, via
+    fetch_historical_forecast_with_periods) rather than two separate
+    functions that each independently fetched and derived precipitation -
+    see that function's docstring for why splitting it caused a source's own
+    daily precipitation total to disagree with the sum of its own 4 periods.
     Open-Meteo is intentionally the backbone here because its Historical
     Forecast API lets us retrieve archived forecasts rather than just observed
     weather. Optional providers are live-only and are not backfilled here.
     """
     today = local_today(location)
-    with db.connect(db_path) as conn:
+    with db.connect(db_path) as conn, db.connect_periods(get_periods_db_path(db_path)) as period_conn:
         for i in range(1, days_back + 1):
             try:
                 actual = open_meteo.fetch_actual(location, today - timedelta(days=i))
@@ -87,11 +94,19 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
             except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the whole backfill
                 print(f"WARN: actual backfill failed for day -{i}: {_safe_error(exc)}")
 
+        try:
+            actual_periods = open_meteo.fetch_historical_actual_periods(location, days_back)
+            for r in actual_periods:
+                db.upsert_actual_period(period_conn, r)
+        except Exception as exc:  # noqa: BLE001 - actuals failing shouldn't abort the model backfill below
+            print(f"WARN: actual period backfill failed: {_safe_error(exc)}")
+
         for model in OPEN_METEO_BACKFILL_MODELS:
             try:
-                records = open_meteo.fetch_historical_forecasts(location, days_back, model=model)
-                inserted = db.insert_forecasts(conn, records)
-                print(f"Backfilled {inserted} rows for open_meteo_{model}")
+                forecasts, periods = open_meteo.fetch_historical_forecast_with_periods(location, days_back, model=model)
+                inserted = db.insert_forecasts(conn, forecasts)
+                inserted_periods = db.insert_forecast_periods(period_conn, periods)
+                print(f"Backfilled {inserted} rows ({inserted_periods} period rows) for open_meteo_{model}")
             except Exception as exc:  # noqa: BLE001 - one bad model shouldn't abort the whole backfill
                 print(f"WARN: historical backfill failed for open_meteo_{model}: {_safe_error(exc)}")
 
@@ -104,7 +119,7 @@ def collect_forecast_periods(db_path: Path, location: Location) -> int:
     records = []
     for model in OPEN_METEO_MODELS:
         try:
-            records.extend(open_meteo.fetch_forecast_periods(location, model=model))
+            records.extend(open_meteo.fetch_forecast_with_periods(location, model=model)[1])
         except Exception as exc:  # noqa: BLE001 - keep collection robust if one model fails
             print(f"WARN: open_meteo_{model} periods failed: {_safe_error(exc)}")
 
@@ -119,27 +134,6 @@ def record_actual_periods(db_path: Path, location: Location, target_date: date |
     with db.connect_periods(get_periods_db_path(db_path)) as conn:
         for r in records:
             db.upsert_actual_period(conn, r)
-
-
-def backfill_periods(db_path: Path, location: Location, days_back: int) -> None:
-    """Backfill sub-daily rain: actual_periods plus every backfillable
-    Open-Meteo model's forecast_periods - mirrors backfill() above.
-    """
-    with db.connect_periods(get_periods_db_path(db_path)) as conn:
-        try:
-            records = open_meteo.fetch_historical_actual_periods(location, days_back)
-            for r in records:
-                db.upsert_actual_period(conn, r)
-        except Exception as exc:  # noqa: BLE001 - actuals failing shouldn't abort the model backfill below
-            print(f"WARN: actual period backfill failed: {_safe_error(exc)}")
-
-        for model in OPEN_METEO_BACKFILL_MODELS:
-            try:
-                records = open_meteo.fetch_historical_forecast_periods(location, days_back, model=model)
-                inserted = db.insert_forecast_periods(conn, records)
-                print(f"Backfilled {inserted} period rows for open_meteo_{model}")
-            except Exception as exc:  # noqa: BLE001 - one bad model shouldn't abort the whole backfill
-                print(f"WARN: historical period backfill failed for open_meteo_{model}: {_safe_error(exc)}")
 
 
 def load_modelling_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:
@@ -462,6 +456,90 @@ def blend_forecast_period(
         conn.commit()
 
     return {"forecast_date": target_date.isoformat(), "period": period, "precipitation_sum": blended, "metadata": metadata}
+
+
+_RECONCILE_TABLES = {
+    "ensemble": ("ensemble_predictions", "ensemble_predictions_periods"),
+    "ml": ("ml_predictions", "ml_predictions_periods"),
+}
+
+
+def reconcile_period_predictions(
+    db_path: Path, location: Location, model_kind: str, forecast_dates: list[str]
+) -> dict[str, int]:
+    """Rescale each date's 4 period predictions so they sum to the daily
+    prediction for the same (model, location, date).
+
+    The daily precipitation_sum forecast and its 4-period split are blended
+    (ensemble) or trained (ML) completely independently, with no arithmetic
+    constraint linking them - even with fully self-consistent raw sources,
+    two independently-weighted or independently-trained models routinely
+    disagree (confirmed empirically: e.g. one day's ensemble blend predicted
+    2.83mm daily against a 1.49mm sum across its own 4 periods). This is a
+    pure post-hoc rescale of whatever was already blended/predicted, not a
+    re-blend - the daily prediction is treated as the anchor and the periods
+    are scaled to match it, preserving their relative shape.
+
+    `model_kind` is "ensemble" or "ml". Safe to call repeatedly (e.g. once
+    per location after every forecast/predict-ml/backtest run) - already-
+    reconciled dates rescale by a ~1.0 factor and are effectively a no-op.
+    """
+    daily_table, period_table = _RECONCILE_TABLES[model_kind]
+    reconciled = 0
+    skipped_no_daily = 0
+    skipped_incomplete_periods = 0
+
+    with db.connect(db_path) as conn, db.connect_periods(get_periods_db_path(db_path)) as period_conn:
+        for forecast_date in forecast_dates:
+            daily_row = conn.execute(
+                f"SELECT precipitation_sum FROM {daily_table} WHERE location_name=? AND forecast_date=? "
+                "ORDER BY generated_at DESC LIMIT 1",
+                (location.name, forecast_date),
+            ).fetchone()
+            if daily_row is None or daily_row[0] is None:
+                skipped_no_daily += 1
+                continue
+            daily_value = daily_row[0]
+
+            period_rows: dict[str, tuple[int, float]] = {}
+            for period in PERIODS:
+                row = period_conn.execute(
+                    f"SELECT id, precipitation_sum FROM {period_table} "
+                    "WHERE location_name=? AND forecast_date=? AND period=? "
+                    "ORDER BY generated_at DESC LIMIT 1",
+                    (location.name, forecast_date, period),
+                ).fetchone()
+                if row is None or row[1] is None:
+                    break
+                period_rows[period] = (row[0], row[1])
+            if len(period_rows) != len(PERIODS):
+                skipped_incomplete_periods += 1
+                continue
+
+            total = sum(value for _, value in period_rows.values())
+            if total > 0:
+                scale = daily_value / total
+                new_values = {p: round(value * scale, 2) for p, (_, value) in period_rows.items()}
+            elif daily_value > 0:
+                # No relative shape to preserve (every period predicted 0) -
+                # spread the daily total evenly rather than leave it unreconciled.
+                new_values = dict.fromkeys(period_rows, round(daily_value / len(PERIODS), 2))
+            else:
+                new_values = {p: value for p, (_, value) in period_rows.items()}  # both ~0, already consistent
+
+            for period, (row_id, _) in period_rows.items():
+                period_conn.execute(
+                    f"UPDATE {period_table} SET precipitation_sum=? WHERE id=?",
+                    (new_values[period], row_id),
+                )
+            reconciled += 1
+        period_conn.commit()
+
+    return {
+        "reconciled": reconciled,
+        "skipped_no_daily": skipped_no_daily,
+        "skipped_incomplete_periods": skipped_incomplete_periods,
+    }
 
 
 def export_modelling_table(db_path: Path, location: Location, output_path: Path) -> Path:

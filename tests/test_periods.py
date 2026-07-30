@@ -6,10 +6,19 @@ import pandas as pd
 
 from weather_ensemble.backtest import backtest_period_predictions
 from weather_ensemble.config import Location, get_periods_db_path
-from weather_ensemble.db import connect_periods, insert_forecast_periods, upsert_actual_period
+from weather_ensemble.db import (
+    connect,
+    connect_periods,
+    insert_forecast_periods,
+    upsert_actual_period,
+)
 from weather_ensemble.ml import predict_latest_ml_period, train_period_model
 from weather_ensemble.models import ActualPeriodRecord, ForecastPeriodRecord
-from weather_ensemble.service import blend_forecast_period, compute_period_mae_scores
+from weather_ensemble.service import (
+    blend_forecast_period,
+    compute_period_mae_scores,
+    reconcile_period_predictions,
+)
 
 LOCATION = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
 
@@ -225,3 +234,121 @@ def test_backtest_period_predictions_writes_ensemble_and_ml_rows(tmp_path):
     assert ml_row is not None
     assert ml_row["forecast_date"] == target_day.isoformat()
     assert ml_row["period"] == period
+
+
+def _insert_daily_prediction(db_path, table: str, forecast_date: date, precipitation_sum: float) -> None:
+    generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
+    with connect(db_path) as conn:
+        if table == "ensemble_predictions":
+            conn.execute(
+                """
+                INSERT INTO ensemble_predictions (
+                    location_name, lat, lon, forecast_date, generated_at, window_days, precipitation_sum, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (LOCATION.name, LOCATION.lat, LOCATION.lon, forecast_date.isoformat(), generated_at, 30, precipitation_sum, "{}"),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO ml_predictions (
+                    location_name, lat, lon, forecast_date, generated_at, model_version, precipitation_sum, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (LOCATION.name, LOCATION.lat, LOCATION.lon, forecast_date.isoformat(), generated_at, "test-v1", precipitation_sum, "{}"),
+            )
+        conn.commit()
+
+
+def _insert_period_predictions(db_path, table: str, forecast_date: date, period_values: dict[str, float]) -> None:
+    generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
+    with connect_periods(get_periods_db_path(db_path)) as conn:
+        for period, value in period_values.items():
+            if table == "ensemble_predictions_periods":
+                conn.execute(
+                    """
+                    INSERT INTO ensemble_predictions_periods (
+                        location_name, lat, lon, forecast_date, period, generated_at, window_days, precipitation_sum, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (LOCATION.name, LOCATION.lat, LOCATION.lon, forecast_date.isoformat(), period, generated_at, 30, value, "{}"),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO ml_predictions_periods (
+                        location_name, lat, lon, forecast_date, period, generated_at, model_version, precipitation_sum, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (LOCATION.name, LOCATION.lat, LOCATION.lon, forecast_date.isoformat(), period, generated_at, "test-v1", value, "{}"),
+                )
+        conn.commit()
+
+
+def test_reconcile_period_predictions_rescales_periods_to_match_daily_total(tmp_path):
+    """Mirrors the real gap found in production: the ensemble's own daily
+    blend predicted 2.83mm for a day while its 4 independently-blended
+    periods summed to only 1.49mm - two independently-weighted quantities
+    with no arithmetic link between them. Reconciliation should rescale the
+    periods to sum to the (anchor) daily total while preserving their
+    relative shape.
+    """
+    db_path = tmp_path / "weather.db"
+    forecast_date = date(2026, 7, 25)
+    _insert_daily_prediction(db_path, "ensemble_predictions", forecast_date, 2.83)
+    _insert_period_predictions(
+        db_path, "ensemble_predictions_periods", forecast_date,
+        {"overnight": 0.50, "morning": 0.30, "afternoon": 0.40, "evening": 0.29},
+    )
+
+    result = reconcile_period_predictions(db_path, LOCATION, "ensemble", [forecast_date.isoformat()])
+    assert result == {"reconciled": 1, "skipped_no_daily": 0, "skipped_incomplete_periods": 0}
+
+    with connect_periods(get_periods_db_path(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT period, precipitation_sum FROM ensemble_predictions_periods "
+            "WHERE location_name = ? AND forecast_date = ?",
+            (LOCATION.name, forecast_date.isoformat()),
+        ).fetchall()
+    reconciled = {r["period"]: r["precipitation_sum"] for r in rows}
+
+    assert abs(sum(reconciled.values()) - 2.83) < 0.01
+    # Relative shape preserved: overnight had the largest share before (0.50 of 1.49) and still does after.
+    assert reconciled["overnight"] > reconciled["morning"]
+    assert reconciled["overnight"] > reconciled["evening"]
+
+
+def test_reconcile_period_predictions_spreads_evenly_when_periods_are_all_zero(tmp_path):
+    """No relative shape to preserve when every period predicted 0 - spread
+    the daily total evenly rather than leave the periods unreconciled at 0."""
+    db_path = tmp_path / "weather.db"
+    forecast_date = date(2026, 7, 26)
+    _insert_daily_prediction(db_path, "ml_predictions", forecast_date, 2.0)
+    _insert_period_predictions(
+        db_path, "ml_predictions_periods", forecast_date,
+        {"overnight": 0.0, "morning": 0.0, "afternoon": 0.0, "evening": 0.0},
+    )
+
+    result = reconcile_period_predictions(db_path, LOCATION, "ml", [forecast_date.isoformat()])
+    assert result["reconciled"] == 1
+
+    with connect_periods(get_periods_db_path(db_path)) as conn:
+        rows = conn.execute(
+            "SELECT precipitation_sum FROM ml_predictions_periods WHERE location_name = ? AND forecast_date = ?",
+            (LOCATION.name, forecast_date.isoformat()),
+        ).fetchall()
+    values = [r["precipitation_sum"] for r in rows]
+    assert all(abs(v - 0.5) < 0.001 for v in values)  # 2.0mm spread evenly across 4 periods
+
+
+def test_reconcile_period_predictions_skips_dates_missing_daily_or_period_data(tmp_path):
+    db_path = tmp_path / "weather.db"
+    forecast_date = date(2026, 7, 27)
+    # No daily prediction inserted at all, and only 3 of 4 periods.
+    _insert_period_predictions(
+        db_path, "ensemble_predictions_periods", forecast_date,
+        {"overnight": 0.1, "morning": 0.1, "afternoon": 0.1},
+    )
+
+    result = reconcile_period_predictions(db_path, LOCATION, "ensemble", [forecast_date.isoformat()])
+    assert result == {"reconciled": 0, "skipped_no_daily": 1, "skipped_incomplete_periods": 0}

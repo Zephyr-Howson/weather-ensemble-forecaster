@@ -9,10 +9,10 @@ name: Regenerate accuracy report
 # refresh the report:
 # - `workflow_run` covers the normal nightly case: once daily-collect.yml
 #   finishes collecting fresh data.
-# - `push` on data/weather.db covers a manual local push (a backfill, a
-#   dedupe, a retrain) that changes the underlying data outside the nightly
-#   run - this is exactly the step that's been forgotten/done by hand
-#   repeatedly so far.
+# - `push` on data/weather.db or data/weather_periods.db covers a manual
+#   local push (a backfill, a dedupe, a retrain, a reconcile) that changes
+#   the underlying data outside the nightly run - this is exactly the step
+#   that's been forgotten/done by hand repeatedly so far.
 # - `workflow_dispatch` covers "just regenerate it right now" with no
 #   underlying data change at all (e.g. after a report-rendering code fix).
 on:
@@ -23,6 +23,7 @@ on:
     branches: [main]
     paths:
       - data/weather.db
+      - data/weather_periods.db
   workflow_dispatch:
 
 concurrency:

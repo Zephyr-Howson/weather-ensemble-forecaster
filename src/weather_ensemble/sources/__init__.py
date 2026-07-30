@@ -20,7 +20,7 @@ ForecastFetcher = Callable[[Location], ForecastRecord]
 # Core free ensemble: multiple Open-Meteo model outputs. These are the most
 # important sources because they can be both collected live and backfilled.
 OPEN_METEO_FORECAST_SOURCES: dict[str, ForecastFetcher] = {
-    f"open_meteo_{model}": (lambda location, model=model: open_meteo.fetch_forecast(location, model))
+    f"open_meteo_{model}": (lambda location, model=model: open_meteo.fetch_forecast_with_periods(location, model)[0])
     for model in OPEN_METEO_MODELS
 }
 

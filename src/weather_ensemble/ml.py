@@ -344,7 +344,7 @@ def train_period_model(
     output_dir.mkdir(parents=True, exist_ok=True)
     df = build_period_feature_table(db_path, location, period, window_days=window_days)
     if df.empty:
-        return {"error": "No modelling rows available. Run backfill_periods first.", "period": period}
+        return {"error": "No modelling rows available. Run --backfill first.", "period": period}
 
     target_col = "actual_precipitation_sum"
     if target_col not in df.columns:

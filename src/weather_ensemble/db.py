@@ -197,8 +197,8 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     # Rows inserted before collection_method existed have no way to record how
     # they were collected. Recover it from the raw_json tag that
-    # fetch_historical_forecasts stamps on backfilled rows; everything else was
-    # collected live.
+    # fetch_historical_forecast_with_periods stamps on backfilled rows;
+    # everything else was collected live.
     conn.execute(
         "UPDATE forecasts SET collection_method = 'backfill' "
         "WHERE collection_method IS NULL AND raw_json LIKE '%historical_forecast_or_past_days%'"

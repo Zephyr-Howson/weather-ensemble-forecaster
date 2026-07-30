@@ -31,13 +31,13 @@ from weather_ensemble.scoring import build_period_predictions_long, build_predic
 from weather_ensemble.service import (
     _safe_error,
     backfill,
-    backfill_periods,
     blend_forecast,
     blend_forecast_period,
     collect_forecast_periods,
     collect_forecasts,
     collect_open_meteo_only,
     export_modelling_table,
+    reconcile_period_predictions,
     record_actual,
     record_actual_periods,
 )
@@ -80,7 +80,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--collect", action="store_true", help="Collect forecasts for tomorrow")
     parser.add_argument("--collect-open-meteo", action="store_true", help="Collect only free Open-Meteo model forecasts")
     parser.add_argument("--record-actual", action="store_true", help="Record yesterday's actual weather")
-    parser.add_argument("--backfill", type=int, metavar="DAYS", help="Backfill forecasts and actuals")
+    parser.add_argument(
+        "--backfill", type=int, metavar="DAYS", help="Backfill forecasts and actuals (daily and sub-daily rain periods)"
+    )
     parser.add_argument("--forecast", action="store_true", help="Generate weighted-average blended forecast")
     parser.add_argument("--all", action="store_true", help="Run collect, record actual, and weighted forecast")
     parser.add_argument("--export", type=Path, help="Export long modelling table to parquet/csv")
@@ -166,9 +168,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--record-actual-periods", action="store_true", help="[small slice] Record yesterday's sub-daily rain actuals"
-    )
-    parser.add_argument(
-        "--backfill-periods", type=int, metavar="DAYS", help="[small slice] Backfill sub-daily rain forecasts and actuals"
     )
     parser.add_argument(
         "--forecast-periods",
@@ -305,12 +304,6 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
             _print_json(result)
         ok &= _guarded(location, "backtest", _backtest)
 
-    if args.backfill_periods:
-        def _backfill_periods():
-            backfill_periods(args.db, location, args.backfill_periods)
-            print(f"Backfilled {args.backfill_periods} days of sub-daily rain data for {location.name}")
-        ok &= _guarded(location, "backfill_periods", _backfill_periods)
-
     if args.collect_periods:
         def _collect_periods():
             n = collect_forecast_periods(args.db, location)
@@ -324,11 +317,17 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         ok &= _guarded(location, "record_actual_periods", _record_actual_periods)
 
     if args.forecast_periods:
+        forecast_dates: set[str] = set()
         for period in PERIODS:
             def _forecast_period(period=period):
                 result = blend_forecast_period(args.db, location, period, args.window)
                 _print_json(result)
+                if "forecast_date" in result:
+                    forecast_dates.add(result["forecast_date"])
             ok &= _guarded(location, f"blend_forecast_period[{period}]", _forecast_period)
+        if forecast_dates:
+            recon = reconcile_period_predictions(args.db, location, "ensemble", sorted(forecast_dates))
+            print(f"Reconciled ensemble periods to daily total: {recon}")
 
     if args.train_periods:
         for period in PERIODS:
@@ -338,13 +337,20 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
             ok &= _guarded(location, f"train_period[{period}]", _train_period)
 
     if args.predict_ml_periods:
+        forecast_dates = set()
         for period in PERIODS:
             def _predict_ml_period(period=period):
                 result = predict_latest_ml_period(args.db, location, period, model_dir)
                 _print_json(result)
+                if "forecast_date" in result:
+                    forecast_dates.add(result["forecast_date"])
             ok &= _guarded(location, f"predict_ml_period[{period}]", _predict_ml_period)
+        if forecast_dates:
+            recon = reconcile_period_predictions(args.db, location, "ml", sorted(forecast_dates))
+            print(f"Reconciled ML periods to daily total: {recon}")
 
     if args.backtest_periods_days:
+        date_ranges = []
         for period in PERIODS:
             def _backtest_period(period=period):
                 result = backtest_period_predictions(
@@ -352,7 +358,17 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
                     ensemble_window_days=args.window, train_window_days=args.train_window,
                 )
                 _print_json(result)
+                if "date_range" in result:
+                    date_ranges.append(result["date_range"])
             ok &= _guarded(location, f"backtest_period[{period}]", _backtest_period)
+        if date_ranges:
+            start = min(r[0] for r in date_ranges)
+            end = max(r[1] for r in date_ranges)
+            all_dates = [d.date().isoformat() for d in pd.date_range(start, end)]
+            recon_ens = reconcile_period_predictions(args.db, location, "ensemble", all_dates)
+            recon_ml = reconcile_period_predictions(args.db, location, "ml", all_dates)
+            print(f"Reconciled historical ensemble periods: {recon_ens}")
+            print(f"Reconciled historical ML periods: {recon_ml}")
 
     return ok
 
@@ -374,7 +390,6 @@ def main() -> None:
         args.predict_ml,
         args.deploy_phases,
         args.backtest_days,
-        args.backfill_periods,
         args.collect_periods,
         args.record_actual_periods,
         args.forecast_periods,

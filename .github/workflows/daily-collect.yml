@@ -44,6 +44,17 @@ jobs:
       - run: pip install -e .
 
       - name: Collect, record actual, blend baseline, retrain, and predict for every location
+        # Small-slice sub-daily rain periods (--collect-periods onward) were
+        # previously never run by this workflow at all - the whole feature's
+        # data only ever got refreshed by hand, and would have silently gone
+        # stale the day after whichever manual run last touched it. Kept as
+        # explicit flags alongside --all rather than folded into it, same
+        # reasoning as cli.py's flag layout: nothing about the existing daily
+        # pipeline changes, this is purely additive. No --backtest-periods-
+        # days here, matching --backtest-days's absence above - backtesting
+        # reconstructs history that was never live-predicted; a normal daily
+        # run always produces today's live prediction directly and never
+        # needs that catch-up path.
         env:
           WEATHERAPI_KEY: ${{ secrets.WEATHERAPI_KEY }}
           VISUAL_CROSSING_KEY: ${{ secrets.VISUAL_CROSSING_KEY }}
@@ -53,7 +64,9 @@ jobs:
         run: |
           weather-ensemble \
             --all-locations \
-            --all --window 30 --train --train-window 90 --predict-ml
+            --all --window 30 --train --train-window 90 --predict-ml \
+            --collect-periods --record-actual-periods --forecast-periods \
+            --train-periods --predict-ml-periods
 
       - name: Commit and push the updated database
         # A real incident: `git pull --rebase` here failed outright, over and
@@ -69,17 +82,21 @@ jobs:
         # changes are ever discarded) and then re-applies only this run's own
         # data/weather.db on top before committing - so a race can, at worst,
         # cost this job's own DB update one more fetch-and-retry, never a
-        # dropped commit.
+        # dropped commit. data/weather_periods.db (sub-daily rain) is a
+        # second, separate SQLite file - see get_periods_db_path - carried
+        # through the same re-sync-then-reapply dance alongside it.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           cp data/weather.db /tmp/collected_weather.db
+          cp data/weather_periods.db /tmp/collected_weather_periods.db
 
           for attempt in 1 2 3 4 5; do
             git fetch origin main
             git reset --hard origin/main
             cp /tmp/collected_weather.db data/weather.db
-            git add data/weather.db
+            cp /tmp/collected_weather_periods.db data/weather_periods.db
+            git add data/weather.db data/weather_periods.db
             if git diff --cached --quiet; then
               echo "No changes to commit"
               exit 0

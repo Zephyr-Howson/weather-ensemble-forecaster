@@ -27,7 +27,6 @@ def _base_args(**overrides) -> argparse.Namespace:
         "train": False,
         "predict_ml": False,
         "backtest_days": None,
-        "backfill_periods": None,
         "collect_periods": False,
         "record_actual_periods": False,
         "forecast_periods": False,
