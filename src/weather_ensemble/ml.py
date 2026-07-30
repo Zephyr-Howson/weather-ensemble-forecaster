@@ -427,7 +427,8 @@ def predict_latest_ml_period(
             """,
             (
                 location.name, location.lat, location.lon, forecast_date, period,
-                generated_at, MODEL_VERSION, prediction, json.dumps(metadata),
+                generated_at, MODEL_VERSION, prediction,
+                None,  # metadata_json: not persisted (write-only, never read back) - see archive.py
             ),
         )
         conn.commit()
@@ -512,7 +513,7 @@ def predict_latest_ml(db_path: Path, location: Location, model_dir: Path, target
                 predictions.get("did_rain"), predictions.get("did_rain_probability"),
                 predictions.get("wind_speed"), predictions.get("wind_gusts"),
                 predictions.get("cloud_cover"), predictions.get("humidity"), predictions.get("pressure_msl"),
-                json.dumps(metadata),
+                None,  # metadata_json: not persisted (write-only, never read back) - see archive.py
             ),
         )
         conn.commit()

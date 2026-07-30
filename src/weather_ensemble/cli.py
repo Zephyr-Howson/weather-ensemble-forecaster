@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from weather_ensemble.archive import archive_old_forecasts, export_blob_backlog
 from weather_ensemble.backtest import backtest_period_predictions, backtest_predictions
 from weather_ensemble.config import (
     AUSTRALIAN_LOCATIONS,
@@ -154,8 +155,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--dedupe",
         action="store_true",
-        help="Remove duplicate rows across forecasts/actuals/ensemble_predictions/ml_predictions "
-        "(same source/location/date), keeping the highest-priority one (whole database, not per-location)",
+        help="Remove duplicate rows across every prediction/observation table in both databases "
+        "(same source/location/date[/period]), keeping the highest-priority one (whole database, not per-location)",
+    )
+    parser.add_argument(
+        "--export-blob-backlog",
+        action="store_true",
+        help="One-time: move every write-only JSON blob column's existing content "
+        "(forecasts/actuals.raw_json, ensemble/ML predictions' metadata_json) to Parquet under "
+        "data/archive/, then clear it from the live row. Safe to re-run - reports 0 archived once done.",
+    )
+    parser.add_argument(
+        "--archive-forecasts-days",
+        type=int,
+        metavar="DAYS",
+        help="Move forecasts/forecast_periods rows older than DAYS to Parquet under data/archive/, "
+        "then delete them from the live database. Actuals and every prediction table are kept "
+        "forever and untouched by this. Safe to run on a schedule.",
     )
 
     # Small-slice sub-daily (morning/afternoon/evening) rain prediction - kept
@@ -398,12 +414,26 @@ def main() -> None:
         args.backtest_periods_days,
     ]
 
-    if not any(per_location_actions) and not args.accuracy_report and not args.dedupe:
+    if (
+        not any(per_location_actions)
+        and not args.accuracy_report
+        and not args.dedupe
+        and not args.export_blob_backlog
+        and args.archive_forecasts_days is None
+    ):
         parser.print_help()
         return
 
     if args.dedupe:
         result = deduplicate(args.db)
+        _print_json(result)
+
+    if args.export_blob_backlog:
+        result = export_blob_backlog(args.db)
+        _print_json(result)
+
+    if args.archive_forecasts_days is not None:
+        result = archive_old_forecasts(args.db, cutoff_days=args.archive_forecasts_days)
         _print_json(result)
 
     exit_code = 0

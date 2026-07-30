@@ -109,5 +109,4 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         humidity=_mean([_to_float(m.get("humidity")) for m in main]),
         pressure_msl=_mean([_to_float(m.get("sea_level", m.get("pressure"))) for m in main]),
         weather_code=_to_float(weather_ids[len(weather_ids) // 2]) if weather_ids else None,
-        raw_json=payload,
     )

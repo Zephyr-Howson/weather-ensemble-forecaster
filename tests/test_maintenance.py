@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from weather_ensemble.db import connect
+from weather_ensemble.config import get_periods_db_path
+from weather_ensemble.db import connect, connect_periods
 from weather_ensemble.maintenance import deduplicate
 
 
@@ -70,3 +71,40 @@ def test_dedupe_is_idempotent_with_no_duplicates(tmp_path):
     assert report["forecasts"]["removed"] == 0
     report_again = deduplicate(db_path)
     assert report_again["forecasts"]["removed"] == 0
+
+
+def test_dedupe_covers_period_tables_keeping_newest_generated_at(tmp_path):
+    """The period tables (sub-daily rain) previously had no dedupe coverage
+    at all - repeated manual pipeline runs on the same day left multiple
+    generations of the same (location, date, period) prediction sitting
+    around. deduplicate() now also cleans those up, same newest-wins rule as
+    ensemble_predictions.
+    """
+    db_path = tmp_path / "weather.db"
+    with connect_periods(get_periods_db_path(db_path)) as conn:
+        conn.execute(
+            """
+            INSERT INTO ensemble_predictions_periods (
+                location_name, lat, lon, forecast_date, period, generated_at, window_days, precipitation_sum, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("Melbourne", -37.8, 144.9, "2026-07-30", "overnight", "2026-07-29T05:52:41", 30, 0.13, "{}"),
+        )
+        conn.execute(
+            """
+            INSERT INTO ensemble_predictions_periods (
+                location_name, lat, lon, forecast_date, period, generated_at, window_days, precipitation_sum, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            ("Melbourne", -37.8, 144.9, "2026-07-30", "overnight", "2026-07-29T21:00:00", 30, 0.09, "{}"),
+        )
+        conn.commit()
+
+    report = deduplicate(db_path)
+    assert report["ensemble_predictions_periods"]["removed"] == 1
+
+    with connect_periods(get_periods_db_path(db_path)) as conn:
+        rows = conn.execute("SELECT generated_at, precipitation_sum FROM ensemble_predictions_periods").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["generated_at"] == "2026-07-29T21:00:00"
+    assert rows[0]["precipitation_sum"] == 0.09

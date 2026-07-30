@@ -149,7 +149,6 @@ def fetch_forecast_with_periods(location: Location, model: str = "best_match") -
         humidity=_mean(hourly_for_target("relative_humidity_2m")),
         pressure_msl=_mean(hourly_for_target("pressure_msl")),
         weather_code=_safe(daily.get("weather_code"), idx),
-        raw_json=payload,
     )
 
     times = hourly.get("time", [])
@@ -209,7 +208,6 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
         humidity=_mean(hourly.get("relative_humidity_2m")),
         pressure_msl=_mean(hourly.get("pressure_msl")),
         weather_code=_safe(daily.get("weather_code"), 0),
-        raw_json=payload,
     )
 
 

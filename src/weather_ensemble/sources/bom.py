@@ -73,5 +73,4 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         min_temp=_to_float(day.get("temp_min")),
         rain_probability=_to_float(rain.get("chance")),
         precipitation_sum=precipitation_sum,
-        raw_json=payload,
     )

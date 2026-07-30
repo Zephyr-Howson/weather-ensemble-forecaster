@@ -66,7 +66,8 @@ jobs:
             --all-locations \
             --all --window 30 --train --train-window 90 --predict-ml \
             --collect-periods --record-actual-periods --forecast-periods \
-            --train-periods --predict-ml-periods
+            --train-periods --predict-ml-periods \
+            --archive-forecasts-days 180
 
       - name: Commit and push the updated database
         # A real incident: `git pull --rebase` here failed outright, over and
@@ -85,18 +86,26 @@ jobs:
         # dropped commit. data/weather_periods.db (sub-daily rain) is a
         # second, separate SQLite file - see get_periods_db_path - carried
         # through the same re-sync-then-reapply dance alongside it.
+        # data/archive/ (Parquet, see archive.py) gets the same treatment -
+        # --archive-forecasts-days above only ever appends to or trims these
+        # files, so re-applying this run's copy on top of latest origin can't
+        # lose anything either.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           cp data/weather.db /tmp/collected_weather.db
           cp data/weather_periods.db /tmp/collected_weather_periods.db
+          mkdir -p data/archive /tmp/collected_archive
+          cp -r data/archive/. /tmp/collected_archive/
 
           for attempt in 1 2 3 4 5; do
             git fetch origin main
             git reset --hard origin/main
             cp /tmp/collected_weather.db data/weather.db
             cp /tmp/collected_weather_periods.db data/weather_periods.db
-            git add data/weather.db data/weather_periods.db
+            mkdir -p data/archive
+            cp -r /tmp/collected_archive/. data/archive/
+            git add data/weather.db data/weather_periods.db data/archive
             if git diff --cached --quiet; then
               echo "No changes to commit"
               exit 0

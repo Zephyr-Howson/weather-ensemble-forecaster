@@ -58,5 +58,4 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         humidity=_mean_hourly(hourly, "humidity"),
         pressure_msl=_mean_hourly(hourly, "pressure"),
         weather_code=_to_float(hourly[0].get("weatherCode")) if hourly else None,
-        raw_json=payload,
     )

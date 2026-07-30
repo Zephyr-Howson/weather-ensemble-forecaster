@@ -79,5 +79,4 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         humidity=_to_float(humidity.get("Average") if isinstance(humidity, dict) else None),
         pressure_msl=None,  # Not exposed by the base 5-day forecast endpoint.
         weather_code=_to_float(day_part.get("Icon")),
-        raw_json=payload,
     )

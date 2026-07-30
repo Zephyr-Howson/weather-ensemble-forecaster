@@ -83,5 +83,4 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         humidity=humidity if humidity is not None else _mean(hours, "humidity"),
         pressure_msl=_mean(hours, "pressure_mb"),
         weather_code=weather_code,
-        raw_json=payload,
     )

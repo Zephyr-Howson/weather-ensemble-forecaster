@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -92,7 +91,8 @@ def _backtest_ensemble(
             blended.get("max_temp"), blended.get("min_temp"), blended.get("rain_probability"),
             blended.get("precipitation_sum"), blended.get("did_rain"),
             blended.get("wind_speed"), blended.get("wind_gusts"), blended.get("cloud_cover"),
-            blended.get("humidity"), blended.get("pressure_msl"), json.dumps(metadata),
+            blended.get("humidity"), blended.get("pressure_msl"),
+            None,  # metadata_json: not persisted (write-only, never read back) - see archive.py
         ),
     )
     return "written"
@@ -163,7 +163,7 @@ def _backtest_ml(
             predictions.get("did_rain"), predictions.get("did_rain_probability"),
             predictions.get("wind_speed"), predictions.get("wind_gusts"),
             predictions.get("cloud_cover"), predictions.get("humidity"), predictions.get("pressure_msl"),
-            json.dumps(metadata),
+            None,  # metadata_json: not persisted (write-only, never read back) - see archive.py
         ),
     )
     return "written"
@@ -203,7 +203,8 @@ def _backtest_ensemble_period(
         """,
         (
             location.name, location.lat, location.lon, d_iso, period,
-            _generated_at_for(target_date), window_days, blended, json.dumps(metadata),
+            _generated_at_for(target_date), window_days, blended,
+            None,  # metadata_json: not persisted (write-only, never read back) - see archive.py
         ),
     )
     return "written"
@@ -242,11 +243,10 @@ def _backtest_ml_period(
         return "skipped_insufficient_data"
 
     X, y = data[features], data[target_col]
-    model_type, model = _make_model("precipitation_sum")
+    _model_type, model = _make_model("precipitation_sum")
     model.fit(X, y)
     X_pred = predict_row.reindex(columns=features)
     prediction = round(clip_prediction("precipitation_sum", float(model.predict(X_pred)[0])), 2)
-    metadata = {"backtest": True, "precipitation_sum": {"model_type": model_type, "train_rows": len(data)}}
 
     conn.execute(
         """
@@ -257,7 +257,8 @@ def _backtest_ml_period(
         """,
         (
             location.name, location.lat, location.lon, d_iso, period,
-            _generated_at_for(target_date), BACKTEST_MODEL_VERSION, prediction, json.dumps(metadata),
+            _generated_at_for(target_date), BACKTEST_MODEL_VERSION, prediction,
+            None,  # metadata_json: not persisted (write-only, never read back) - see archive.py
         ),
     )
     return "written"

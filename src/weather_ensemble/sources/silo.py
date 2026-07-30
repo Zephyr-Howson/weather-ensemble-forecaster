@@ -77,5 +77,4 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
         min_temp=_to_float(values.get("min_temp")),
         precipitation_sum=precip,
         did_rain=_did_rain(precip),
-        raw_json=payload,
     )

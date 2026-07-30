@@ -68,5 +68,4 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         humidity=_to_float(day.get("rh")),
         pressure_msl=_to_float(pressure),
         weather_code=_to_float(weather.get("code")),
-        raw_json=payload,
     )

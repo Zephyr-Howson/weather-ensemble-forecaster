@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 import re
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -311,7 +310,8 @@ def blend_forecast(db_path: Path, location: Location, window_days: int, target_d
                 blended.get("max_temp"), blended.get("min_temp"), blended.get("rain_probability"),
                 blended.get("precipitation_sum"), blended.get("did_rain"),
                 blended.get("wind_speed"), blended.get("wind_gusts"), blended.get("cloud_cover"),
-                blended.get("humidity"), blended.get("pressure_msl"), json.dumps(metadata),
+                blended.get("humidity"), blended.get("pressure_msl"),
+                None,  # metadata_json: not persisted (write-only, never read back) - see archive.py
             ),
         )
         conn.commit()
@@ -450,7 +450,8 @@ def blend_forecast_period(
             (
                 location.name, location.lat, location.lon, target_date.isoformat(), period,
                 datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds"), window_days,
-                blended, json.dumps(metadata),
+                blended,
+                None,  # metadata_json: not persisted (write-only, never read back) - see archive.py
             ),
         )
         conn.commit()

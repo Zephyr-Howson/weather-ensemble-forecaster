@@ -81,5 +81,4 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         humidity=humidity if humidity is not None else _mean(hours, "humidity"),
         pressure_msl=pressure if pressure is not None else _mean(hours, "pressure"),
         weather_code=None,  # Visual Crossing uses textual conditions/icons rather than WMO codes.
-        raw_json=payload,
     )
