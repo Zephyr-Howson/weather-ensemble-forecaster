@@ -22,7 +22,9 @@ from weather_ensemble.scoring import (
 LOCATION = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
 
 
-def _forecast(source: str, forecast_date: date, max_temp: float, precipitation_sum: float = 0.0) -> ForecastRecord:
+def _forecast(
+    source: str, forecast_date: date, max_temp: float, precipitation_sum: float = 0.0, rain_probability: float = 70.0
+) -> ForecastRecord:
     return ForecastRecord(
         source=source,
         location_name=LOCATION.name,
@@ -33,6 +35,7 @@ def _forecast(source: str, forecast_date: date, max_temp: float, precipitation_s
         max_temp=max_temp,
         min_temp=max_temp - 5,
         precipitation_sum=precipitation_sum,
+        rain_probability=rain_probability,
         wind_speed=20.0,
         wind_gusts=30.0,
         raw_json={},
@@ -74,26 +77,26 @@ def _seed_db(db_path, num_days: int = 10, start: date | None = None) -> date:
                 """
                 INSERT INTO ensemble_predictions (
                     location_name, lat, lon, forecast_date, generated_at, window_days,
-                    max_temp, min_temp, precipitation_sum, did_rain, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_temp, min_temp, precipitation_sum, did_rain, rain_probability, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     LOCATION.name, LOCATION.lat, LOCATION.lon, day.isoformat(),
                     datetime.combine(day, datetime.min.time()).isoformat(), 30,
-                    20.0 + i, 15.0 + i, 0.0 if i % 3 else 5.0, 0 if i % 3 else 1, json.dumps({}),
+                    20.0 + i, 15.0 + i, 0.0 if i % 3 else 5.0, 0 if i % 3 else 1, 55.0, json.dumps({}),
                 ),
             )
             conn.execute(
                 """
                 INSERT INTO ml_predictions (
                     location_name, lat, lon, forecast_date, generated_at, model_version,
-                    max_temp, min_temp, precipitation_sum, did_rain, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    max_temp, min_temp, precipitation_sum, did_rain, did_rain_probability, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     LOCATION.name, LOCATION.lat, LOCATION.lon, day.isoformat(),
                     datetime.combine(day, datetime.min.time()).isoformat(), "test-v1",
-                    20.5 + i, 15.5 + i, 0.0 if i % 3 else 5.0, 0 if i % 3 else 1, json.dumps({}),
+                    20.5 + i, 15.5 + i, 0.0 if i % 3 else 5.0, 0 if i % 3 else 1, 0.6, json.dumps({}),
                 ),
             )
     return start
@@ -108,10 +111,18 @@ def test_build_predictions_long_includes_every_model(tmp_path):
     models = set(long_df["model"].unique())
     assert {"open_meteo_best_match", "open_meteo_gfs_global", MODEL_ENSEMBLE, MODEL_ML, BASELINE_PERSISTENCE, BASELINE_CLIMATOLOGY} <= models
     assert "did_rain" in set(long_df["target"].unique())
-    # Raw sources don't store did_rain directly - it must be derived from precipitation_sum.
+    # Raw sources don't store did_rain directly - "Rain" is scored as % chance
+    # of rain, so predicted comes from rain_probability (0-100) normalized to
+    # a 0-1 fraction, not a thresholded 0/1 classification.
     raw_rain_rows = long_df[(long_df["model"] == "open_meteo_best_match") & (long_df["target"] == "did_rain")]
     assert not raw_rain_rows.empty
-    assert set(raw_rain_rows["predicted"].unique()) <= {0.0, 1.0}
+    assert set(raw_rain_rows["predicted"].unique()) == {0.7}
+
+    ensemble_rain_rows = long_df[(long_df["model"] == MODEL_ENSEMBLE) & (long_df["target"] == "did_rain")]
+    assert set(ensemble_rain_rows["predicted"].unique()) == {0.55}
+
+    ml_rain_rows = long_df[(long_df["model"] == MODEL_ML) & (long_df["target"] == "did_rain")]
+    assert set(ml_rain_rows["predicted"].unique()) == {0.6}
 
 
 def test_persistence_and_climatology_use_only_past_data(tmp_path):

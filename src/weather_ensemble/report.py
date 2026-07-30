@@ -9,7 +9,13 @@ import pandas as pd
 import plotly.graph_objects as go
 
 from weather_ensemble import db
-from weather_ensemble.config import AUSTRALIAN_LOCATIONS, PERIODS, TARGETS, Location
+from weather_ensemble.config import (
+    AUSTRALIAN_LOCATIONS,
+    PERIODS,
+    TARGETS,
+    Location,
+    get_periods_db_path,
+)
 from weather_ensemble.scoring import (
     BASELINE_CLIMATOLOGY,
     BASELINE_PERSISTENCE,
@@ -78,8 +84,25 @@ TARGET_LABELS = {
 PERIOD_TARGETS = [f"precipitation_sum_{period}" for period in PERIODS]
 TARGET_LABELS.update({f"precipitation_sum_{period}": f"Precipitation — {period.capitalize()}" for period in PERIODS})
 
+# Single source of truth for target order, used by both the "recent
+# forecasts" table and the historical-performance cards - requested display
+# order rather than TARGETS' declaration order (did_rain moves before
+# precipitation_sum, and the sub-daily periods slot in right after it).
+TARGET_ORDER = [
+    "max_temp",
+    "min_temp",
+    "did_rain",
+    "precipitation_sum",
+    *PERIOD_TARGETS,
+    "wind_speed",
+    "wind_gusts",
+    "cloud_cover",
+    "humidity",
+    "pressure_msl",
+]
+
 RECENT_DAYS_COUNT = 5
-RECENT_TARGETS = list(TARGETS)
+RECENT_TARGETS = TARGET_ORDER
 RECENT_UNITS = {
     "max_temp": "°C",
     "min_temp": "°C",
@@ -90,13 +113,16 @@ RECENT_UNITS = {
     "humidity": "%",
     "pressure_msl": "hPa",
 }
+RECENT_UNITS.update({f"precipitation_sum_{period}": "mm" for period in PERIODS})
 
 
-def _format_recent_value(target: str, value) -> str:
+def _format_recent_value(target: str, value, field: str) -> str:
     if value is None:
         return "—"
     if target == "did_rain":
-        return "Yes" if value else "No"
+        if field == "actual":
+            return "Yes" if value else "No"
+        return f"{float(value) * 100:.0f}%"
     return f"{float(value):.1f}{RECENT_UNITS.get(target, '')}"
 
 
@@ -110,7 +136,7 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
     blank cell instead.
     """
     data: dict[str, list[dict]] = {}
-    with db.connect(db_path) as conn:
+    with db.connect(db_path) as conn, db.connect_periods(get_periods_db_path(db_path)) as period_conn:
         for location in locations:
             date_rows = conn.execute(
                 """
@@ -142,12 +168,56 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
                     "ORDER BY collected_at DESC LIMIT 1",
                     (location.name, d_iso),
                 ).fetchone()
+
+                ensemble_values = {t: (ens[t] if ens is not None else None) for t in RECENT_TARGETS if t in TARGETS}
+                ml_values = {t: (ml[t] if ml is not None else None) for t in RECENT_TARGETS if t in TARGETS}
+                actual_values = {t: (actual[t] if actual is not None else None) for t in RECENT_TARGETS if t in TARGETS}
+
+                # "Rain" is a % chance forecast now (still scored against the
+                # binary did_rain actual - see scoring.py), so the two forecast
+                # columns show each model's underlying probability field
+                # instead of its thresholded 0/1 classification. Actual stays
+                # the true observed outcome, untouched.
+                if ens is not None and ens["rain_probability"] is not None:
+                    ensemble_values["did_rain"] = round(ens["rain_probability"] / 100.0, 3)
+                if ml is not None and ml["did_rain_probability"] is not None:
+                    ml_values["did_rain"] = ml["did_rain_probability"]
+
+                # Sub-daily rain periods live in a separate DB/tables (see
+                # get_periods_db_path) keyed by (location, date, period)
+                # rather than a column per period, so each is a small extra
+                # lookup merged in under its synthetic "precipitation_sum_
+                # {period}" target name.
+                for period in PERIODS:
+                    key = f"precipitation_sum_{period}"
+                    ens_p = period_conn.execute(
+                        "SELECT precipitation_sum FROM ensemble_predictions_periods "
+                        "WHERE location_name = ? AND forecast_date = ? AND period = ? "
+                        "ORDER BY generated_at DESC LIMIT 1",
+                        (location.name, d_iso, period),
+                    ).fetchone()
+                    ml_p = period_conn.execute(
+                        "SELECT precipitation_sum FROM ml_predictions_periods "
+                        "WHERE location_name = ? AND forecast_date = ? AND period = ? "
+                        "ORDER BY generated_at DESC LIMIT 1",
+                        (location.name, d_iso, period),
+                    ).fetchone()
+                    actual_p = period_conn.execute(
+                        "SELECT precipitation_sum FROM actual_periods "
+                        "WHERE location_name = ? AND actual_date = ? AND period = ? "
+                        "ORDER BY collected_at DESC LIMIT 1",
+                        (location.name, d_iso, period),
+                    ).fetchone()
+                    ensemble_values[key] = ens_p["precipitation_sum"] if ens_p is not None else None
+                    ml_values[key] = ml_p["precipitation_sum"] if ml_p is not None else None
+                    actual_values[key] = actual_p["precipitation_sum"] if actual_p is not None else None
+
                 days.append(
                     {
                         "date": d_iso,
-                        "ensemble": {t: (ens[t] if ens is not None else None) for t in RECENT_TARGETS},
-                        "ml": {t: (ml[t] if ml is not None else None) for t in RECENT_TARGETS},
-                        "actual": {t: (actual[t] if actual is not None else None) for t in RECENT_TARGETS},
+                        "ensemble": ensemble_values,
+                        "ml": ml_values,
+                        "actual": actual_values,
                     }
                 )
             data[location.name] = days
@@ -167,9 +237,9 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
     for day_idx, day in enumerate(sample_days):
         rows = "".join(
             f"<tr><td>{escape(TARGET_LABELS.get(t, t))}</td>"
-            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ensemble'>{escape(_format_recent_value(t, day['ensemble'].get(t)))}</td>"
-            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ml'>{escape(_format_recent_value(t, day['ml'].get(t)))}</td>"
-            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='actual'>{escape(_format_recent_value(t, day['actual'].get(t)))}</td>"
+            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ensemble'>{escape(_format_recent_value(t, day['ensemble'].get(t), 'ensemble'))}</td>"
+            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ml'>{escape(_format_recent_value(t, day['ml'].get(t), 'ml'))}</td>"
+            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='actual'>{escape(_format_recent_value(t, day['actual'].get(t), 'actual'))}</td>"
             "</tr>"
             for t in RECENT_TARGETS
         )
@@ -195,9 +265,12 @@ def _recent_forecast_script(recent_data: dict) -> str:
 <script>
 {_js_object_assignment("__RECENT_DATA", recent_data)}
 window.__RECENT_UNITS = {json.dumps(RECENT_UNITS)};
-window.__formatRecentValue = function (target, value) {{
+window.__formatRecentValue = function (target, value, field) {{
   if (value === null || value === undefined) return "—";
-  if (target === "did_rain") return value ? "Yes" : "No";
+  if (target === "did_rain") {{
+    if (field === "actual") return value ? "Yes" : "No";
+    return (Number(value) * 100).toFixed(0) + "%";
+  }}
   var unit = window.__RECENT_UNITS[target] || "";
   return Number(value).toFixed(1) + unit;
 }};
@@ -216,7 +289,7 @@ function updateRecentForecast(loc) {{
     document.querySelectorAll('[data-day="' + i + '"]').forEach(function (cell) {{
       var target = cell.dataset.target, field = cell.dataset.field;
       var value = day[field] ? day[field][target] : null;
-      cell.textContent = window.__formatRecentValue(target, value);
+      cell.textContent = window.__formatRecentValue(target, value, field);
     }});
   }});
 }}
@@ -802,8 +875,7 @@ def build_html_report(
     recent_days = min(recent_days, history_days)
     board = leaderboard(long_df, recent_days=recent_days)
     trend = rolling_error_over_time(long_df, window=rolling_window)
-    targets = [t for t in TARGETS if t in long_df["target"].unique()]
-    targets += [t for t in PERIOD_TARGETS if t in long_df["target"].unique()]
+    targets = [t for t in TARGET_ORDER if t in long_df["target"].unique()]
     raw_colors = _raw_source_colors(
         {m for m in long_df["model"].unique() if m not in HERO_STYLE and m not in BASELINE_STYLE}
     )
@@ -939,7 +1011,7 @@ def build_html_report(
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
   <div class="legend-key">{legend_key}</div>
   {''.join(cards)}
-  <footer>Lower is better for every metric shown, including did_rain (mean absolute error against the 0/1 outcome). Bar/line order stays fixed to the all-locations ranking when you switch locations, so series don't jump around.</footer>
+  <footer>Lower is better for every metric shown. Rain is scored as % chance of rain against the binary rain/no-rain outcome (mean absolute error between the forecast probability and the 0/1 actual); every other metric is mean absolute error in its native unit. Bar/line order stays fixed to the all-locations ranking when you switch locations, so series don't jump around.</footer>
 </div>
 {_theme_script(theme_traces)}
 {_controls_script(location_data)}

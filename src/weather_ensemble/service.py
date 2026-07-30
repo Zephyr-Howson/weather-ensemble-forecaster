@@ -125,15 +125,13 @@ def backfill_periods(db_path: Path, location: Location, days_back: int) -> None:
     """Backfill sub-daily rain: actual_periods plus every backfillable
     Open-Meteo model's forecast_periods - mirrors backfill() above.
     """
-    today = local_today(location)
     with db.connect_periods(get_periods_db_path(db_path)) as conn:
-        for i in range(1, days_back + 1):
-            try:
-                records = open_meteo.fetch_actual_periods(location, today - timedelta(days=i))
-                for r in records:
-                    db.upsert_actual_period(conn, r)
-            except Exception as exc:  # noqa: BLE001 - one bad day shouldn't abort the whole backfill
-                print(f"WARN: actual period backfill failed for day -{i}: {_safe_error(exc)}")
+        try:
+            records = open_meteo.fetch_historical_actual_periods(location, days_back)
+            for r in records:
+                db.upsert_actual_period(conn, r)
+        except Exception as exc:  # noqa: BLE001 - actuals failing shouldn't abort the model backfill below
+            print(f"WARN: actual period backfill failed: {_safe_error(exc)}")
 
         for model in OPEN_METEO_BACKFILL_MODELS:
             try:

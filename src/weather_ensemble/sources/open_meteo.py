@@ -410,3 +410,53 @@ def fetch_historical_forecast_periods(location: Location, days_back: int, model:
             )
         day += timedelta(days=1)
     return records
+
+
+def fetch_historical_actual_periods(location: Location, days_back: int) -> list[ActualPeriodRecord]:
+    """Batched equivalent of calling fetch_actual_periods once per day - a
+    single date-range archive request instead of days_back individual ones,
+    same batching fetch_historical_forecast_periods already does for the
+    forecast side. The per-day loop this replaces made backfill_periods()
+    issue up to 90 sequential requests per location with no concurrency,
+    which made a full 30-location backfill take multiple hours.
+    """
+    today = local_today(location)
+    start = today - timedelta(days=days_back)
+    end = today - timedelta(days=1)
+    url = "https://archive-api.open-meteo.com/v1/archive"
+    params = {
+        "latitude": location.lat,
+        "longitude": location.lon,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "hourly": "precipitation",
+        "timezone": location.timezone,
+    }
+    response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
+    payload = response.json()
+    hourly = payload.get("hourly", {})
+    times = hourly.get("time", [])
+    values = hourly.get("precipitation", [])
+    collected_at = datetime.now(UTC).replace(tzinfo=None)
+
+    records: list[ActualPeriodRecord] = []
+    day = start
+    while day <= end:
+        precip_by_period = _bucket_hourly_by_period(times, values, day, lambda vals: round(sum(vals), 3))
+        for period in PERIODS:
+            precip = precip_by_period[period]
+            records.append(
+                ActualPeriodRecord(
+                    source="open_meteo_archive",
+                    location_name=location.name,
+                    lat=location.lat,
+                    lon=location.lon,
+                    actual_date=day,
+                    period=period,
+                    collected_at=collected_at,
+                    precipitation_sum=precip,
+                    did_rain=_did_rain(precip),
+                )
+            )
+        day += timedelta(days=1)
+    return records

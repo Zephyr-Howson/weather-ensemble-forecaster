@@ -8,7 +8,6 @@ import pandas as pd
 from weather_ensemble import db
 from weather_ensemble.config import (
     PERIODS,
-    RAIN_THRESHOLD_MM,
     TARGETS,
     Location,
     get_periods_db_path,
@@ -45,13 +44,17 @@ def _long_rows_from_wide(
             if pd.isna(actual):
                 continue
 
-            if target == "did_rain" and target not in wide.columns:
-                # Raw provider forecasts don't carry did_rain directly - derive it
-                # from precipitation_sum using the same threshold actuals use.
-                precip = r.get("precipitation_sum")
-                if pd.isna(precip):
+            if target == "did_rain":
+                # Scored as % chance of rain against the binary rain/no-rain
+                # outcome (mean absolute error between a 0-1 forecast
+                # probability and the 0/1 actual), not a thresholded
+                # classification - callers normalize whichever probability
+                # field their model carries (rain_probability, 0-100;
+                # did_rain_probability, already 0-1) into this common column.
+                predicted = r.get("_rain_prob_fraction")
+                if pd.isna(predicted):
                     continue
-                predicted = float(precip >= RAIN_THRESHOLD_MM)
+                predicted = float(predicted)
             else:
                 predicted = r.get(target)
                 if pd.isna(predicted):
@@ -75,6 +78,8 @@ def _source_predictions(db_path: Path, location: Location, window_days: int | No
     wide = load_modelling_table(db_path, location, window_days=window_days)
     if wide.empty:
         return []
+    if "rain_probability" in wide.columns:
+        wide = wide.assign(_rain_prob_fraction=wide["rain_probability"] / 100.0)
     return _long_rows_from_wide(wide, model_col="source", date_col="forecast_date")
 
 
@@ -91,7 +96,7 @@ def _ensemble_predictions(db_path: Path, location: Location, window_days: int | 
                 WHERE location_name = ? AND forecast_date >= ?
             )
             SELECT e.location_name, e.forecast_date, e.max_temp, e.min_temp,
-                   e.precipitation_sum, e.did_rain, e.wind_speed, e.wind_gusts,
+                   e.precipitation_sum, e.did_rain, e.rain_probability, e.wind_speed, e.wind_gusts,
                    e.cloud_cover, e.humidity, e.pressure_msl,
                    a.max_temp AS actual_max_temp, a.min_temp AS actual_min_temp,
                    a.precipitation_sum AS actual_precipitation_sum, a.did_rain AS actual_did_rain,
@@ -107,6 +112,8 @@ def _ensemble_predictions(db_path: Path, location: Location, window_days: int | 
         )
     if wide.empty:
         return []
+    if "rain_probability" in wide.columns:
+        wide = wide.assign(_rain_prob_fraction=wide["rain_probability"] / 100.0)
     return _long_rows_from_wide(wide, model_col="", date_col="forecast_date", source_prefix=MODEL_ENSEMBLE)
 
 
@@ -123,7 +130,7 @@ def _ml_predictions(db_path: Path, location: Location, window_days: int | None =
                 WHERE location_name = ? AND forecast_date >= ?
             )
             SELECT m.location_name, m.forecast_date, m.max_temp, m.min_temp,
-                   m.precipitation_sum, m.did_rain, m.wind_speed, m.wind_gusts,
+                   m.precipitation_sum, m.did_rain, m.did_rain_probability, m.wind_speed, m.wind_gusts,
                    m.cloud_cover, m.humidity, m.pressure_msl,
                    a.max_temp AS actual_max_temp, a.min_temp AS actual_min_temp,
                    a.precipitation_sum AS actual_precipitation_sum, a.did_rain AS actual_did_rain,
@@ -139,6 +146,8 @@ def _ml_predictions(db_path: Path, location: Location, window_days: int | None =
         )
     if wide.empty:
         return []
+    if "did_rain_probability" in wide.columns:
+        wide = wide.assign(_rain_prob_fraction=wide["did_rain_probability"])
     return _long_rows_from_wide(wide, model_col="", date_col="forecast_date", source_prefix=MODEL_ML)
 
 
