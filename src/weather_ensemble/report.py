@@ -16,6 +16,7 @@ from weather_ensemble.config import (
     Location,
     get_periods_db_path,
 )
+from weather_ensemble.data_quality import compute_data_quality
 from weather_ensemble.scoring import (
     BASELINE_CLIMATOLOGY,
     BASELINE_PERSISTENCE,
@@ -635,6 +636,87 @@ def _table_view(board_t: pd.DataFrame) -> str:
     )
 
 
+def _data_quality_for_js(data_quality: dict) -> dict:
+    """data_quality.compute_data_quality returns raw entity identifiers
+    (source names, "ensemble"/"ml"/"best") - presentation-agnostic, like the
+    rest of that module. This is the one place that translates them to the
+    same friendly labels (_display_name) everywhere else in the report uses,
+    done once here rather than needing the embedded JS to re-derive them.
+    """
+    return {
+        key: {
+            "missing_pct": payload["missing_pct"],
+            "null_pct": payload["null_pct"],
+            "entities": [
+                {"label": _display_name(e["name"]), "missing_pct": e["missing_pct"], "null_pct": e["null_pct"]}
+                for e in payload["entities"]
+            ],
+        }
+        for key, payload in data_quality.items()
+    }
+
+
+def _data_quality_html(data_quality_js: dict, window_days: int) -> str:
+    """Renders the pooled ("__ALL__") view as the initial static HTML -
+    updateDataQuality (see _data_quality_script) swaps in per-location
+    numbers on location change, exactly like every other location-reactive
+    element in this report.
+    """
+    pooled = data_quality_js["__ALL__"]
+    rows = "".join(
+        f"<tr><td>{escape(e['label'])}</td>"
+        f"<td class='num'>{e['missing_pct']:.2f}%</td>"
+        f"<td class='num'>{e['null_pct']:.2f}%</td></tr>"
+        for e in pooled["entities"]
+    )
+    return f"""<section class="data-quality-section" id="data-quality-section">
+  <h2>Data quality</h2>
+  <p class="section-sub">Over the last {window_days}d, scoped to <span id="dq-location-label">all locations pooled</span>.</p>
+  <div class="dq-summary">
+    <div class="dq-stat">
+      <span class="dq-stat-value" id="dq-missing-pct">{pooled["missing_pct"]:.2f}%</span>
+      <span class="dq-stat-label">of expected forecast rows are missing entirely</span>
+    </div>
+    <div class="dq-stat">
+      <span class="dq-stat-value" id="dq-null-pct">{pooled["null_pct"]:.2f}%</span>
+      <span class="dq-stat-label">of fields in existing rows are unexpectedly null (excludes fields a source/model never reports at all)</span>
+    </div>
+  </div>
+  <details class="table-view dq-breakdown">
+    <summary>Breakdown by source/model</summary>
+    <table>
+      <thead><tr><th>Source</th><th class="num">Missing rows</th><th class="num">Unexpected nulls</th></tr></thead>
+      <tbody id="dq-breakdown-body">{rows}</tbody>
+    </table>
+  </details>
+</section>"""
+
+
+def _data_quality_script(data_quality_js: dict) -> str:
+    return f"""
+<script>
+{_js_object_assignment("__DATA_QUALITY", data_quality_js)}
+function updateDataQuality(loc) {{
+  var dq = window.__DATA_QUALITY[loc] || window.__DATA_QUALITY["__ALL__"];
+  if (!dq) return;
+  var missingEl = document.getElementById("dq-missing-pct");
+  if (missingEl) missingEl.textContent = dq.missing_pct.toFixed(2) + "%";
+  var nullEl = document.getElementById("dq-null-pct");
+  if (nullEl) nullEl.textContent = dq.null_pct.toFixed(2) + "%";
+  var label = document.getElementById("dq-location-label");
+  if (label) label.textContent = (!loc || loc === "__ALL__") ? "all locations pooled" : loc;
+  var tbody = document.getElementById("dq-breakdown-body");
+  if (tbody) {{
+    tbody.innerHTML = dq.entities.map(function (e) {{
+      return "<tr><td>" + e.label + "</td><td class='num'>" + e.missing_pct.toFixed(2) + "%</td>"
+        + "<td class='num'>" + e.null_pct.toFixed(2) + "%</td></tr>";
+    }}).join("");
+  }}
+}}
+</script>
+"""
+
+
 def _legend_gradient_css() -> str:
     """CSS custom properties for the legend's raw-source gradient swatch,
     generated from the same RAW_SOURCE_GRADIENT_LIGHT/DARK constants the
@@ -892,6 +974,20 @@ details.table-view td.num, details.table-view th.num { text-align: right; font-v
 
 footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
 .empty { color: var(--text-secondary); padding: 40px 0; text-align: center; }
+
+.data-quality-section { margin: 28px 0 0; }
+.data-quality-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 4px; }
+.dq-summary { display: flex; gap: 14px; flex-wrap: wrap; margin: 14px 0; }
+.dq-stat {
+  flex: 1 1 220px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 12px;
+  padding: 14px 18px;
+}
+.dq-stat-value { display: block; font-size: 24px; font-weight: 650; letter-spacing: -0.01em; }
+.dq-stat-label { display: block; font-size: 12.5px; color: var(--text-secondary); margin-top: 2px; }
+.dq-breakdown table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12.5px; }
+.dq-breakdown th, .dq-breakdown td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+.dq-breakdown td.num, .dq-breakdown th.num { text-align: right; font-variant-numeric: tabular-nums; }
 """
 
 
@@ -1066,6 +1162,7 @@ function renderCharts() {{
   localStorage.setItem("weather-report-location", loc);
   localStorage.setItem("weather-report-show-baselines", showBaselines ? "1" : "0");
   if (typeof updateRecentForecast === "function") updateRecentForecast(loc);
+  if (typeof updateDataQuality === "function") updateDataQuality(loc);
 }}
 document.addEventListener("DOMContentLoaded", function () {{
   var select = document.getElementById("location-select");
@@ -1161,6 +1258,13 @@ def build_html_report(
     location_names = sorted(long_df["location_name"].unique())
     target_slices = {t: long_df[long_df["target"] == t] for t in targets}
     combo_slices = {key: df for key, df in long_df.groupby(["target", "location_name"])}
+
+    # Same recent_days window as the leaderboard above (default 30) - reusing
+    # that existing, already-configurable parameter rather than a second
+    # hardcoded "last N days" concept for what's fundamentally the same idea.
+    data_quality_js = _data_quality_for_js(compute_data_quality(db_path, location_names, window_days=recent_days))
+    data_quality_html = _data_quality_html(data_quality_js, recent_days)
+    data_quality_script = _data_quality_script(data_quality_js)
 
     theme_traces: dict[str, dict] = {}
     location_data: dict[str, dict] = {}
@@ -1302,11 +1406,13 @@ def build_html_report(
   </div>
   <div class="legend-key" id="legend-key">{legend_key_hero}{legend_key_raw}<span id="legend-baselines" style="display:none">{legend_key_baselines}</span></div>
   {''.join(cards)}
+  {data_quality_html}
   <footer>Lower is better for every metric shown. Rain is scored as % chance of rain against the binary rain/no-rain outcome (mean absolute error between the forecast probability and the 0/1 actual); every other metric is mean absolute error in its native unit.</footer>
 </div>
 {_theme_script(theme_traces)}
 {_controls_script(location_data)}
 {recent_forecast_script}
+{data_quality_script}
 {_toolbar_height_script()}
 </body>
 </html>"""
