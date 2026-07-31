@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections import Counter
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
@@ -591,6 +592,92 @@ def _table_view(board_t: pd.DataFrame) -> str:
     )
 
 
+def _summary_entry(target: str, board_t: pd.DataFrame) -> dict:
+    """The winning (lowest-MAE) model for one target's pooled leaderboard,
+    plus its improvement over the persistence baseline. `board_t` is always
+    the full per-target board (every source/model/baseline), so the
+    persistence row - when present - necessarily has mae >= the winner's,
+    since the winner is that same column's minimum; improvement_pct is left
+    None only when persistence has no score at all for this target, not
+    because the winner could ever be behind it.
+    """
+    ranked = board_t.sort_values("mae")
+    winner = ranked.iloc[0]
+    persistence = ranked[ranked["model"] == BASELINE_PERSISTENCE]
+    improvement_pct = None
+    if not persistence.empty and winner["model"] not in BASELINE_STYLE:
+        persistence_mae = float(persistence.iloc[0]["mae"])
+        if persistence_mae > 0:
+            improvement_pct = max(0.0, (persistence_mae - float(winner["mae"])) / persistence_mae * 100)
+    return {"target": target, "model": winner["model"], "mae": float(winner["mae"]), "improvement_pct": improvement_pct}
+
+
+def _summary_category(model: str) -> str:
+    if model == MODEL_ENSEMBLE:
+        return "Weighted model"
+    if model == MODEL_ML:
+        return "ML model"
+    if model in BASELINE_STYLE:
+        return "a naive baseline"
+    return "an individual source"
+
+
+def _summary_html(entries: list[dict], raw_colors: dict[str, dict[str, str]], recent_days: int) -> str:
+    """Top-of-page 'who's winning' overview: one tile per target naming its
+    current best model, plus a headline tallying how many targets each
+    category (Weighted / ML / a raw source / a baseline) leads - the
+    at-a-glance answer that would otherwise take reading every leaderboard
+    card below to piece together. Always scoped to all locations pooled,
+    independent of the location dropdown below it (a per-location refresh
+    would need its own client-side recompute for little payoff, since this
+    is a one-time overview rather than a chart meant to be sliced by filter).
+    """
+    if not entries:
+        return ""
+
+    counts = Counter(_summary_category(e["model"]) for e in entries)
+    parts = [f"{label} leads on {n} of {len(entries)}" for label, n in counts.most_common()]
+    headline = ", ".join(parts[:-1]) + (" and " if len(parts) > 1 else "") + parts[-1]
+
+    tiles = []
+    for e in entries:
+        style = _style_for(e["model"], raw_colors)
+        delta = ""
+        if e["improvement_pct"] is not None:
+            delta = f'<span class="summary-tile-delta">&darr; {e["improvement_pct"]:.0f}% vs persistence</span>'
+        tiles.append(
+            f"""<a class="summary-tile" href="#card-{escape(e['target'])}">
+  <span class="summary-tile-label">{escape(TARGET_LABELS.get(e['target'], e['target']))}</span>
+  <span class="summary-tile-winner"><span class="dot" style="background:{style['light']}"></span>{escape(_bar_display_name(e['model']))}</span>
+  <span class="summary-tile-mae">{e['mae']:.2f} MAE</span>
+  {delta}
+</a>"""
+        )
+
+    return f"""<section class="summary-section" id="overview">
+  <h2>Overview</h2>
+  <p class="section-sub">{escape(headline)} &middot; all locations pooled, last {recent_days}d</p>
+  <div class="summary-grid">{"".join(tiles)}</div>
+</section>"""
+
+
+def _legend_gradient_css() -> str:
+    """CSS custom properties for the legend's raw-source gradient swatch,
+    generated from the same RAW_SOURCE_GRADIENT_LIGHT/DARK constants the
+    charts themselves use - kept as a small standalone snippet (rather than
+    folding into the static _PAGE_CSS string) so those two hex pairs stay a
+    single source of truth instead of a second hardcoded copy drifting out
+    of sync with the chart gradient.
+    """
+    return f"""
+:root {{ --raw-grad-a: {RAW_SOURCE_GRADIENT_LIGHT[0]}; --raw-grad-b: {RAW_SOURCE_GRADIENT_LIGHT[1]}; }}
+@media (prefers-color-scheme: dark) {{
+  :root:where(:not([data-theme="light"])) {{ --raw-grad-a: {RAW_SOURCE_GRADIENT_DARK[0]}; --raw-grad-b: {RAW_SOURCE_GRADIENT_DARK[1]}; }}
+}}
+:root[data-theme="dark"] {{ --raw-grad-a: {RAW_SOURCE_GRADIENT_DARK[0]}; --raw-grad-b: {RAW_SOURCE_GRADIENT_DARK[1]}; }}
+"""
+
+
 _PAGE_CSS = """
 :root {
   color-scheme: light;
@@ -645,6 +732,26 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px;
 }
 
+.section-sub { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 14px; }
+
+/* Overview strip: one tile per metric naming the current best (lowest-MAE)
+   model, so "is this thing working" has an answer before scrolling through
+   every leaderboard card below - each tile deep-links to its full card. */
+.summary-section { margin: 20px 0 28px; }
+.summary-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 4px; }
+.summary-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
+.summary-tile {
+  display: flex; flex-direction: column; gap: 4px;
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 14px; text-decoration: none; color: inherit;
+}
+.summary-tile:hover { border-color: var(--text-secondary); }
+.summary-tile-label { font-size: 11.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.02em; }
+.summary-tile-winner { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; }
+.summary-tile-winner .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
+.summary-tile-mae { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
+.summary-tile-delta { font-size: 11.5px; color: #008300; font-variant-numeric: tabular-nums; }
+
 /* Sticky toolbar: jump-nav (scopes which card you jump to) + filters (scope
    every chart below them - see dataviz skill's interaction.md) stay reachable
    the whole way down what is otherwise a very long, many-card page, instead
@@ -685,6 +792,13 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   text-decoration: none;
 }
 .jump-nav a:hover, .jump-nav a.active { color: var(--text-primary); border-color: var(--text-secondary); }
+/* Only fades when there's actually more to scroll to (see updateScrollFade) -
+   an unconditional fade would clip the last pill's readability even when
+   every pill already fits on screen. */
+.jump-nav.has-overflow, .day-tabs.has-overflow {
+  mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
+}
 
 .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 0 0 auto; }
 .theme-toggle, .location-select {
@@ -714,8 +828,13 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   .controls > * { flex: 1 1 auto; min-height: 44px; }
 }
 
-.legend-key { display: flex; gap: 14px 18px; flex-wrap: wrap; margin: 0 0 22px; font-size: 12.5px; color: var(--text-secondary); }
+.legend-key { display: flex; gap: 14px 18px; flex-wrap: wrap; align-items: center; margin: 0 0 22px; font-size: 12.5px; color: var(--text-secondary); }
 .legend-key span.swatch { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
+/* A gradient patch (not a line) for "individual sources" - it stands for a
+   whole family of distinguishable colors, not one line's color, so it reads
+   differently on purpose from the solid hero/baseline swatches beside it. */
+.legend-key span.swatch.swatch-gradient { height: 8px; background: linear-gradient(90deg, var(--raw-grad-a), var(--raw-grad-b)); }
+#legend-baselines { display: flex; gap: 14px 18px; flex-wrap: wrap; }
 
 .recent-forecast-section { margin-bottom: 28px; }
 .recent-forecast-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
@@ -775,8 +894,7 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
      of the page) so this stays correct at any width or wrapped row count. */
   scroll-margin-top: var(--toolbar-height, 72px);
 }
-.card h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
-.card .sub { font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
+.card h2 { font-size: 15px; font-weight: 600; margin: 0 0 14px; }
 .card .panels { display: grid; grid-template-columns: minmax(220px, 0.85fr) minmax(320px, 1.6fr); gap: 8px 20px; }
 @media (max-width: 860px) { .card .panels { grid-template-columns: 1fr; } }
 @media (max-width: 640px) { .card { padding: 14px 14px 6px; } .card h2 { font-size: 14px; } }
@@ -863,8 +981,26 @@ function updateToolbarHeight() {
   if (!subnav) return;
   document.documentElement.style.setProperty("--toolbar-height", (subnav.getBoundingClientRect().height + 16) + "px");
 }
-document.addEventListener("DOMContentLoaded", updateToolbarHeight);
-window.addEventListener("resize", updateToolbarHeight);
+// Only fades a horizontally-scrolling strip's trailing edge when it
+// actually has more content past the visible area - an unconditional fade
+// would clip the last pill/tab's readability even when everything already
+// fits on screen (e.g. a wide desktop viewport with few jump-nav targets).
+function updateScrollFade(el) {
+  if (!el) return;
+  el.classList.toggle("has-overflow", el.scrollWidth > el.clientWidth + 1);
+}
+function updateAllScrollFades() {
+  updateScrollFade(document.querySelector(".jump-nav"));
+  updateScrollFade(document.getElementById("day-tabs"));
+}
+document.addEventListener("DOMContentLoaded", function () {
+  updateToolbarHeight();
+  updateAllScrollFades();
+});
+window.addEventListener("resize", function () {
+  updateToolbarHeight();
+  updateAllScrollFades();
+});
 </script>
 """
 
@@ -927,8 +1063,8 @@ function renderCharts() {{
     }}
   }});
 
-  var legendKey = document.getElementById("legend-key");
-  if (legendKey) legendKey.style.display = showBaselines ? "" : "none";
+  var legendBaselines = document.getElementById("legend-baselines");
+  if (legendBaselines) legendBaselines.style.display = showBaselines ? "" : "none";
 
   var chip = document.getElementById("location-chip");
   if (chip) chip.textContent = loc === "__ALL__" ? "all locations pooled" : "viewing " + loc;
@@ -1034,12 +1170,14 @@ def build_html_report(
     location_data: dict[str, dict] = {}
     cards = []
     rendered_targets: list[str] = []
+    summary_entries: list[dict] = []
     for target in targets:
         board_t = board[board["target"] == target]
         trend_t = trend[trend["target"] == target]
         if board_t.empty or trend_t.empty:
             continue
         rendered_targets.append(target)
+        summary_entries.append(_summary_entry(target, board_t))
 
         board_id = f"board-{target}"
         trend_id = f"trend-{target}"
@@ -1089,7 +1227,6 @@ def build_html_report(
         cards.append(
             f"""<section class="card" id="card-{escape(target)}">
   <h2>{escape(TARGET_LABELS.get(target, target))}</h2>
-  <p class="sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; bar/line order is fixed to the all-locations ranking</p>
   <div class="panels">
     <div>{board_div}{_table_view(board_t)}</div>
     <div>{trend_div}</div>
@@ -1110,13 +1247,21 @@ def build_html_report(
         f'<a href="#card-{escape(target)}">{escape(TARGET_LABELS.get(target, target))}</a>' for target in rendered_targets
     )
 
-    # Weighted/ML/raw-source names are already visible as the leaderboard bar
-    # chart's own category labels, in the same colors used everywhere else -
-    # a second legend for those would just repeat it. Baselines are the one
-    # thing the bar chart doesn't disambiguate (dashed vs dotted isn't a bar
-    # property), so they're the only entries kept here, and only relevant
-    # (shown) while the baseline toggle is actually on - see renderCharts.
-    legend_key = "".join(
+    summary_html = _summary_html(summary_entries, raw_colors, recent_days)
+
+    # Hero (Weighted/ML) and raw-source colors are always visible so the
+    # trend line chart - which has no on-chart legend of its own, see
+    # _trend_figure's docstring - is self-explanatory without hovering.
+    # Baselines are wrapped in their own #legend-baselines span and hidden
+    # by default: dashed-vs-dotted isn't something a bar chart can show, so
+    # they're the one pairing that needs a legend at all, and only while the
+    # baseline toggle is actually on - see renderCharts.
+    legend_key_hero = "".join(
+        f"<span><span class='swatch' style='background:{style['light']}'></span>{escape(style['legend'])}</span>"
+        for style in HERO_STYLE.values()
+    )
+    legend_key_raw = f"<span><span class='swatch swatch-gradient'></span>{escape(RAW_SOURCE_LEGEND)}</span>"
+    legend_key_baselines = "".join(
         f"<span><span class='swatch' style='background:{style['light']}'></span>{escape(style['legend'])}</span>"
         for style in BASELINE_STYLE.values()
     )
@@ -1128,7 +1273,7 @@ def build_html_report(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(title)}</title>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<style>{_PAGE_CSS}</style>
+<style>{_PAGE_CSS}{_legend_gradient_css()}</style>
 </head>
 <body>
 <div class="wrap">
@@ -1141,6 +1286,7 @@ def build_html_report(
       <span class="chip">generated {generated}</span>
     </div>
   </header>
+  {summary_html}
   <div class="subnav">
     <nav class="jump-nav" aria-label="Jump to metric">{jump_nav}</nav>
     <div class="controls">
@@ -1157,9 +1303,10 @@ def build_html_report(
   </div>
   {recent_forecast_html}
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
-  <div class="legend-key" id="legend-key" style="display:none">{legend_key}</div>
+  <p class="section-sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; bar/line order stays fixed to the all-locations ranking when you switch locations.</p>
+  <div class="legend-key" id="legend-key">{legend_key_hero}{legend_key_raw}<span id="legend-baselines" style="display:none">{legend_key_baselines}</span></div>
   {''.join(cards)}
-  <footer>Lower is better for every metric shown. Rain is scored as % chance of rain against the binary rain/no-rain outcome (mean absolute error between the forecast probability and the 0/1 actual); every other metric is mean absolute error in its native unit. Bar/line order stays fixed to the all-locations ranking when you switch locations, so series don't jump around.</footer>
+  <footer>Lower is better for every metric shown. Rain is scored as % chance of rain against the binary rain/no-rain outcome (mean absolute error between the forecast probability and the 0/1 actual); every other metric is mean absolute error in its native unit.</footer>
 </div>
 {_theme_script(theme_traces)}
 {_controls_script(location_data)}
