@@ -61,24 +61,6 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 
 .section-sub { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 14px; }
 
-/* Overview strip: one tile per metric naming the current best (lowest-MAE)
-   model, so "is this thing working" has an answer before scrolling through
-   every leaderboard card below - each tile deep-links to its full card. */
-.summary-section { margin: 20px 0 28px; }
-.summary-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 4px; }
-.summary-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(168px, 1fr)); gap: 10px; }
-.summary-tile {
-  display: flex; flex-direction: column; gap: 4px;
-  background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px;
-  padding: 12px 14px; text-decoration: none; color: inherit;
-}
-.summary-tile:hover { border-color: var(--text-secondary); }
-.summary-tile-label { font-size: 11.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.02em; }
-.summary-tile-winner { display: flex; align-items: center; gap: 6px; font-size: 14px; font-weight: 600; }
-.summary-tile-winner .dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 auto; }
-.summary-tile-mae { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
-.summary-tile-delta { font-size: 11.5px; color: #008300; font-variant-numeric: tabular-nums; }
-
 /* Sticky toolbar: jump-nav (scopes which card you jump to) + filters (scope
    every chart below them - see dataviz skill's interaction.md) stay reachable
    the whole way down what is otherwise a very long, many-card page, instead
@@ -128,12 +110,32 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 }
 
 .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 0 0 auto; }
-.theme-toggle, .location-select {
+.theme-toggle {
   border: 1px solid var(--border); background: var(--page-plane); color: var(--text-secondary);
   border-radius: 8px; padding: 8px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
 }
 .theme-toggle:hover { color: var(--text-primary); }
-.location-select { font-family: inherit; }
+/* The one control that changes what every chart on the page shows, so it
+   gets its own labeled, bordered group (not just a bare unlabeled select
+   blending in among the other pills) plus a visible accent - is-filtered
+   is toggled by renderCharts whenever a specific location (not "All
+   locations") is selected, so "am I looking at one place or everything
+   pooled" is answerable at a glance instead of only from the header chip. */
+.location-field {
+  display: flex; align-items: center; gap: 8px;
+  border: 1px solid var(--border); background: var(--page-plane);
+  border-radius: 8px; padding: 8px 12px; cursor: pointer;
+}
+.location-field:focus-within { border-color: var(--text-secondary); }
+.location-field.is-filtered { border-color: #2a78d6; }
+.location-field-label { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
+.location-field.is-filtered .location-field-label { color: #2a78d6; }
+.location-select {
+  border: none; background: transparent; color: var(--text-primary);
+  font-family: inherit; font-size: 12.5px; cursor: pointer; padding: 0;
+  flex: 1 1 auto; min-width: 130px;
+}
+.location-select:focus { outline: none; }
 .baseline-toggle {
   display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary);
   border: 1px solid var(--border); background: var(--page-plane); border-radius: 8px;
@@ -250,90 +252,23 @@ footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
     <div class="chip-row">
       <span class="chip" id="location-chip">30 location(s) pooled</span>
       <span class="chip">last 90d &middot; 2026-05-02 &rarr; 2026-07-30</span>
-      <span class="chip">generated 2026-07-31T01:33</span>
+      <span class="chip">generated 2026-07-31T01:47</span>
     </div>
   </header>
-  <section class="summary-section" id="overview">
-  <h2>Overview</h2>
-  <p class="section-sub">an individual source leads on 11 of 13 and ML model leads on 2 of 13 &middot; all locations pooled, last 30d</p>
-  <div class="summary-grid"><a class="summary-tile" href="#card-max_temp">
-  <span class="summary-tile-label">Max temperature</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#008300"></span>ML model</span>
-  <span class="summary-tile-mae">0.46 MAE</span>
-  <span class="summary-tile-delta">&darr; 60% vs persistence</span>
-</a><a class="summary-tile" href="#card-min_temp">
-  <span class="summary-tile-label">Min temperature</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#d1a300"></span>Open-Meteo: best match</span>
-  <span class="summary-tile-mae">0.50 MAE</span>
-  <span class="summary-tile-delta">&darr; 65% vs persistence</span>
-</a><a class="summary-tile" href="#card-did_rain">
-  <span class="summary-tile-label">Rain</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#c69104"></span>Open-Meteo: ecmwf ifs025</span>
-  <span class="summary-tile-mae">0.16 MAE</span>
-  <span class="summary-tile-delta">&darr; 40% vs persistence</span>
-</a><a class="summary-tile" href="#card-precipitation_sum">
-  <span class="summary-tile-label">Precipitation</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#c69104"></span>Open-Meteo: ecmwf ifs025</span>
-  <span class="summary-tile-mae">0.50 MAE</span>
-  <span class="summary-tile-delta">&darr; 77% vs persistence</span>
-</a><a class="summary-tile" href="#card-precipitation_sum_overnight">
-  <span class="summary-tile-label">Precipitation — Overnight</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#c69104"></span>Open-Meteo: ecmwf ifs025</span>
-  <span class="summary-tile-mae">0.16 MAE</span>
-  <span class="summary-tile-delta">&darr; 74% vs persistence</span>
-</a><a class="summary-tile" href="#card-precipitation_sum_morning">
-  <span class="summary-tile-label">Precipitation — Morning</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#d1a300"></span>Open-Meteo: best match</span>
-  <span class="summary-tile-mae">0.06 MAE</span>
-  <span class="summary-tile-delta">&darr; 91% vs persistence</span>
-</a><a class="summary-tile" href="#card-precipitation_sum_afternoon">
-  <span class="summary-tile-label">Precipitation — Afternoon</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#d1a300"></span>Open-Meteo: best match</span>
-  <span class="summary-tile-mae">0.14 MAE</span>
-  <span class="summary-tile-delta">&darr; 83% vs persistence</span>
-</a><a class="summary-tile" href="#card-precipitation_sum_evening">
-  <span class="summary-tile-label">Precipitation — Evening</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#d1a300"></span>Open-Meteo: best match</span>
-  <span class="summary-tile-mae">0.02 MAE</span>
-  <span class="summary-tile-delta">&darr; 97% vs persistence</span>
-</a><a class="summary-tile" href="#card-wind_speed">
-  <span class="summary-tile-label">Wind speed</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#d1a300"></span>Open-Meteo: best match</span>
-  <span class="summary-tile-mae">1.33 MAE</span>
-  <span class="summary-tile-delta">&darr; 71% vs persistence</span>
-</a><a class="summary-tile" href="#card-wind_gusts">
-  <span class="summary-tile-label">Wind gusts</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#d1a300"></span>Open-Meteo: best match</span>
-  <span class="summary-tile-mae">2.64 MAE</span>
-  <span class="summary-tile-delta">&darr; 73% vs persistence</span>
-</a><a class="summary-tile" href="#card-cloud_cover">
-  <span class="summary-tile-label">Cloud cover</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#d1a300"></span>Open-Meteo: best match</span>
-  <span class="summary-tile-mae">6.14 MAE</span>
-  <span class="summary-tile-delta">&darr; 68% vs persistence</span>
-</a><a class="summary-tile" href="#card-humidity">
-  <span class="summary-tile-label">Humidity</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#d1a300"></span>Open-Meteo: best match</span>
-  <span class="summary-tile-mae">2.04 MAE</span>
-  <span class="summary-tile-delta">&darr; 65% vs persistence</span>
-</a><a class="summary-tile" href="#card-pressure_msl">
-  <span class="summary-tile-label">Pressure (MSL)</span>
-  <span class="summary-tile-winner"><span class="dot" style="background:#008300"></span>ML model</span>
-  <span class="summary-tile-mae">0.16 MAE</span>
-  <span class="summary-tile-delta">&darr; 95% vs persistence</span>
-</a></div>
-</section>
   <div class="subnav">
     <nav class="jump-nav" aria-label="Jump to metric"><a href="#card-max_temp">Max temperature</a><a href="#card-min_temp">Min temperature</a><a href="#card-did_rain">Rain</a><a href="#card-precipitation_sum">Precipitation</a><a href="#card-precipitation_sum_overnight">Precipitation — Overnight</a><a href="#card-precipitation_sum_morning">Precipitation — Morning</a><a href="#card-precipitation_sum_afternoon">Precipitation — Afternoon</a><a href="#card-precipitation_sum_evening">Precipitation — Evening</a><a href="#card-wind_speed">Wind speed</a><a href="#card-wind_gusts">Wind gusts</a><a href="#card-cloud_cover">Cloud cover</a><a href="#card-humidity">Humidity</a><a href="#card-pressure_msl">Pressure (MSL)</a></nav>
     <div class="controls">
+      <label class="location-field">
+        <span class="location-field-label">Location</span>
+        <select id="location-select" class="location-select">
+          <option value="__ALL__">All locations (pooled)</option>
+          <option value="Adelaide">Adelaide</option><option value="Alice Springs">Alice Springs</option><option value="Ballarat">Ballarat</option><option value="Bendigo">Bendigo</option><option value="Brisbane">Brisbane</option><option value="Broome">Broome</option><option value="Byron Bay">Byron Bay</option><option value="Cairns">Cairns</option><option value="Canberra">Canberra</option><option value="Darwin">Darwin</option><option value="Geelong">Geelong</option><option value="Gold Coast">Gold Coast</option><option value="Hobart">Hobart</option><option value="Kangaroo Island">Kangaroo Island</option><option value="Launceston">Launceston</option><option value="Lorne">Lorne</option><option value="Margaret River">Margaret River</option><option value="Melbourne">Melbourne</option><option value="Mount Gambier">Mount Gambier</option><option value="Newcastle">Newcastle</option><option value="Noosa Heads">Noosa Heads</option><option value="Perth">Perth</option><option value="Phillip Island">Phillip Island</option><option value="Port Douglas">Port Douglas</option><option value="Shoreham">Shoreham</option><option value="Sydney">Sydney</option><option value="Toowoomba">Toowoomba</option><option value="Townsville">Townsville</option><option value="Wollongong">Wollongong</option><option value="Yulara">Yulara</option>
+        </select>
+      </label>
       <label class="baseline-toggle">
         <input type="checkbox" id="baseline-toggle">
         Show baselines
       </label>
-      <select id="location-select" class="location-select">
-        <option value="__ALL__">All locations (pooled)</option>
-        <option value="Adelaide">Adelaide</option><option value="Alice Springs">Alice Springs</option><option value="Ballarat">Ballarat</option><option value="Bendigo">Bendigo</option><option value="Brisbane">Brisbane</option><option value="Broome">Broome</option><option value="Byron Bay">Byron Bay</option><option value="Cairns">Cairns</option><option value="Canberra">Canberra</option><option value="Darwin">Darwin</option><option value="Geelong">Geelong</option><option value="Gold Coast">Gold Coast</option><option value="Hobart">Hobart</option><option value="Kangaroo Island">Kangaroo Island</option><option value="Launceston">Launceston</option><option value="Lorne">Lorne</option><option value="Margaret River">Margaret River</option><option value="Melbourne">Melbourne</option><option value="Mount Gambier">Mount Gambier</option><option value="Newcastle">Newcastle</option><option value="Noosa Heads">Noosa Heads</option><option value="Perth">Perth</option><option value="Phillip Island">Phillip Island</option><option value="Port Douglas">Port Douglas</option><option value="Shoreham">Shoreham</option><option value="Sydney">Sydney</option><option value="Toowoomba">Toowoomba</option><option value="Townsville">Townsville</option><option value="Wollongong">Wollongong</option><option value="Yulara">Yulara</option>
-      </select>
       <button id="theme-toggle" class="theme-toggle" type="button">Dark mode</button>
     </div>
   </div>
@@ -1005,6 +940,8 @@ function renderCharts() {
 
   var chip = document.getElementById("location-chip");
   if (chip) chip.textContent = loc === "__ALL__" ? "all locations pooled" : "viewing " + loc;
+  var locationField = select ? select.closest(".location-field") : null;
+  if (locationField) locationField.classList.toggle("is-filtered", loc !== "__ALL__");
   localStorage.setItem("weather-report-location", loc);
   localStorage.setItem("weather-report-show-baselines", showBaselines ? "1" : "0");
   if (typeof updateRecentForecast === "function") updateRecentForecast(loc);
