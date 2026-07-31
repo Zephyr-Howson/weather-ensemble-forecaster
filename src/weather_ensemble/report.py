@@ -230,11 +230,24 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
     default location selection is "All locations" (pooled), and JS shows it
     with the real selected location's data as soon as it resolves the current
     dropdown value (which may be a remembered real location, not "__ALL__").
+
+    One panel is shown at a time via a day-tab strip, rather than stacking all
+    RECENT_DAYS_COUNT panels - on a phone that's the difference between one
+    table and a scroll past ~5x as many rows before reaching the first chart.
+    updateRecentForecast (see _recent_forecast_script) still refreshes every
+    panel's cells regardless of which one is visible, so switching tabs is a
+    pure CSS/attribute toggle with no data re-fetch.
     """
     sample_days = recent_data.get(sample_location, [])
 
+    tabs = []
     day_cards = []
     for day_idx, day in enumerate(sample_days):
+        is_first = day_idx == 0
+        tabs.append(
+            f'<button type="button" class="day-tab{" active" if is_first else ""}" '
+            f'data-day-tab="{day_idx}">{escape(day["date"])}</button>'
+        )
         rows = "".join(
             f"<tr><td>{escape(TARGET_LABELS.get(t, t))}</td>"
             f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ensemble'>{escape(_format_recent_value(t, day['ensemble'].get(t), 'ensemble'))}</td>"
@@ -243,8 +256,9 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
             "</tr>"
             for t in RECENT_TARGETS
         )
+        hidden_attr = "" if is_first else " hidden"
         day_cards.append(
-            f"""<div class="recent-day-card">
+            f"""<div class="recent-day-card" data-day-panel="{day_idx}"{hidden_attr}>
   <h3 data-day-label="{day_idx}">{escape(day["date"])}</h3>
   <table>
     <colgroup><col class="col-metric"><col class="col-num"><col class="col-num"><col class="col-num"></colgroup>
@@ -256,6 +270,7 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
 
     return f"""<section class="recent-forecast-section" id="recent-forecast-section" style="display:none">
   <h2>Recent forecasts</h2>
+  <div class="day-tabs" id="day-tabs">{"".join(tabs)}</div>
   <div class="recent-days" id="recent-days">{"".join(day_cards)}</div>
 </section>"""
 
@@ -286,6 +301,8 @@ function updateRecentForecast(loc) {{
   days.forEach(function (day, i) {{
     var label = document.querySelector('[data-day-label="' + i + '"]');
     if (label) label.textContent = day.date;
+    var tab = document.querySelector('.day-tab[data-day-tab="' + i + '"]');
+    if (tab) tab.textContent = day.date;
     document.querySelectorAll('[data-day="' + i + '"]').forEach(function (cell) {{
       var target = cell.dataset.target, field = cell.dataset.field;
       var value = day[field] ? day[field][target] : null;
@@ -293,6 +310,20 @@ function updateRecentForecast(loc) {{
     }});
   }});
 }}
+document.addEventListener("DOMContentLoaded", function () {{
+  var tabsEl = document.getElementById("day-tabs");
+  if (!tabsEl) return;
+  tabsEl.addEventListener("click", function (e) {{
+    var tab = e.target.closest(".day-tab");
+    if (!tab) return;
+    tabsEl.querySelectorAll(".day-tab").forEach(function (t) {{ t.classList.remove("active"); }});
+    tab.classList.add("active");
+    var idx = tab.dataset.dayTab;
+    document.querySelectorAll('#recent-days [data-day-panel]').forEach(function (panel) {{
+      panel.hidden = panel.dataset.dayPanel !== idx;
+    }});
+  }});
+}});
 </script>
 """
 
@@ -595,6 +626,8 @@ _PAGE_CSS = """
 }
 
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 body {
   margin: 0;
   background: var(--page-plane);
@@ -602,54 +635,133 @@ body {
   font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
   -webkit-font-smoothing: antialiased;
 }
-.wrap { max-width: 1180px; margin: 0 auto; padding: 32px 24px 80px; }
+.wrap { max-width: 1180px; margin: 0 auto; padding: 28px 24px 80px; }
+@media (max-width: 640px) { .wrap { padding: 18px 14px 56px; } }
 
-header.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 28px; }
-header.top h1 { font-size: 22px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
+header.top { margin-bottom: 18px; }
+header.top h1 { font-size: 21px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
 header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
+@media (max-width: 640px) { header.top h1 { font-size: 18px; } header.top p { font-size: 13px; } }
 .chip-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .chip {
   font-size: 12px; color: var(--text-secondary); background: var(--surface-1);
   border: 1px solid var(--border); border-radius: 999px; padding: 4px 10px;
 }
 
-.controls { display: flex; gap: 8px; align-items: center; }
+/* Sticky toolbar: jump-nav (scopes which card you jump to) + filters (scope
+   every chart below them - see dataviz skill's interaction.md) stay reachable
+   the whole way down what is otherwise a very long, many-card page, instead
+   of forcing a scroll back to the top every time you want to switch location
+   or find a different metric. */
+.subnav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: var(--surface-1);
+  border-bottom: 1px solid var(--border);
+  margin: 0 0 20px;
+  padding: 10px 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  align-items: center;
+}
+.jump-nav {
+  display: flex;
+  gap: 6px;
+  flex: 1 1 320px;
+  min-width: 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+  padding-bottom: 2px;
+}
+.jump-nav a {
+  flex: 0 0 auto;
+  font-size: 12.5px;
+  color: var(--text-secondary);
+  background: var(--page-plane);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 6px 12px;
+  white-space: nowrap;
+  text-decoration: none;
+}
+.jump-nav a:hover, .jump-nav a.active { color: var(--text-primary); border-color: var(--text-secondary); }
+
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 0 0 auto; }
 .theme-toggle, .location-select {
-  border: 1px solid var(--border); background: var(--surface-1); color: var(--text-secondary);
-  border-radius: 8px; padding: 7px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--border); background: var(--page-plane); color: var(--text-secondary);
+  border-radius: 8px; padding: 8px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
 }
 .theme-toggle:hover { color: var(--text-primary); }
 .location-select { font-family: inherit; }
 .baseline-toggle {
   display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary);
-  border: 1px solid var(--border); background: var(--surface-1); border-radius: 8px;
-  padding: 7px 12px; cursor: pointer; white-space: nowrap;
+  border: 1px solid var(--border); background: var(--page-plane); border-radius: 8px;
+  padding: 8px 12px; cursor: pointer; white-space: nowrap;
 }
-.baseline-toggle input { margin: 0; cursor: pointer; }
+.baseline-toggle input { margin: 0; cursor: pointer; width: 16px; height: 16px; }
 
-.legend-key { display: flex; gap: 18px; flex-wrap: wrap; margin: 0 0 22px; font-size: 12.5px; color: var(--text-secondary); }
+/* Below ~700px the toolbar stacks: jump-nav keeps its own horizontally-
+   scrollable row (still reachable with a thumb-swipe), filters wrap onto
+   their own full-width row underneath with 44px-tall touch targets. */
+@media (max-width: 700px) {
+  /* flex-wrap must switch to nowrap here - flex-direction:column with the
+     base row's wrap:wrap left over stops align-items:stretch from working,
+     so the two children rendered at their intrinsic content width instead of
+     the container's, and the whole page scrolled horizontally to show them. */
+  .subnav { flex-direction: column; align-items: stretch; flex-wrap: nowrap; }
+  .jump-nav { order: 1; flex-basis: auto; }
+  .controls { order: 2; flex-wrap: wrap; }
+  .controls > * { flex: 1 1 auto; min-height: 44px; }
+}
+
+.legend-key { display: flex; gap: 14px 18px; flex-wrap: wrap; margin: 0 0 22px; font-size: 12.5px; color: var(--text-secondary); }
 .legend-key span.swatch { display: inline-block; width: 14px; height: 2px; margin-right: 6px; vertical-align: middle; border-radius: 2px; }
 
 .recent-forecast-section { margin-bottom: 28px; }
 .recent-forecast-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
-.recent-days { display: flex; flex-direction: column; gap: 10px; }
+
+/* Day picker: one panel visible at a time instead of stacking all 5 days -
+   a phone screen would otherwise need to scroll past ~65 table rows before
+   reaching a single chart. */
+.day-tabs {
+  display: flex; gap: 6px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin; margin-bottom: 10px; padding-bottom: 2px;
+}
+.day-tabs button {
+  flex: 0 0 auto; font: inherit; font-size: 12.5px; color: var(--text-secondary);
+  background: var(--surface-1); border: 1px solid var(--border); border-radius: 999px;
+  padding: 8px 14px; cursor: pointer; white-space: nowrap; min-height: 40px;
+}
+.day-tabs button.active { color: var(--text-primary); border-color: var(--text-secondary); font-weight: 600; }
+
 .recent-day-card {
   background: var(--surface-1);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 14px 18px;
 }
+.recent-day-card[hidden] { display: none; }
 .recent-day-card h3 { font-size: 13.5px; font-weight: 600; margin: 0 0 8px; color: var(--text-secondary); }
-/* table-layout: fixed + a shared colgroup keeps the Metric/Ensemble/ML/Actual
-   columns at identical widths across every stacked day-card, regardless of
-   how long any one card's values happen to be - without it each table sizes
-   its columns independently and they drift out of alignment card to card. */
+/* table-layout: fixed + a shared colgroup keeps the Metric/Weighted/ML/Actual
+   columns at identical widths across every day panel, regardless of how long
+   any one panel's values happen to be - without it each table sizes its
+   columns independently and they drift out of alignment panel to panel. */
 .recent-day-card table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
 .recent-day-card col.col-metric { width: 40%; }
 .recent-day-card col.col-num { width: 20%; }
-.recent-day-card th, .recent-day-card td { padding: 5px 10px; border-bottom: 1px solid var(--border); text-align: right; }
+.recent-day-card th, .recent-day-card td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: right; }
 .recent-day-card th:first-child, .recent-day-card td:first-child { text-align: left; color: var(--text-secondary); }
 .recent-day-card td.num, .recent-day-card th.num { font-variant-numeric: tabular-nums; }
+@media (max-width: 480px) {
+  .recent-day-card { padding: 12px 12px; }
+  .recent-day-card table { font-size: 12px; }
+  .recent-day-card col.col-metric { width: 34%; }
+  .recent-day-card col.col-num { width: 22%; }
+  .recent-day-card th, .recent-day-card td { padding: 6px 5px; }
+}
 
 .historical-accuracy-heading { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
 
@@ -659,16 +771,23 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   border-radius: 12px;
   padding: 18px 20px 8px;
   margin-bottom: 18px;
+  /* Anchor-jump lands below the sticky toolbar, not underneath it. A fixed
+     px guess broke on mobile, where the toolbar stacks onto 2-3 rows and is
+     2-3x taller than the single-row desktop layout - --toolbar-height is
+     measured from the real, current toolbar (see the script at the bottom
+     of the page) so this stays correct at any width or wrapped row count. */
+  scroll-margin-top: var(--toolbar-height, 72px);
 }
 .card h2 { font-size: 15px; font-weight: 600; margin: 0 0 2px; }
 .card .sub { font-size: 12px; color: var(--text-muted); margin: 0 0 14px; }
 .card .panels { display: grid; grid-template-columns: minmax(220px, 0.85fr) minmax(320px, 1.6fr); gap: 8px 20px; }
 @media (max-width: 860px) { .card .panels { grid-template-columns: 1fr; } }
+@media (max-width: 640px) { .card { padding: 14px 14px 6px; } .card h2 { font-size: 14px; } }
 
 details.table-view { margin: 4px 0 14px; }
-details.table-view summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); }
+details.table-view summary { cursor: pointer; font-size: 12.5px; color: var(--text-secondary); padding: 4px 0; }
 details.table-view table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: 12.5px; }
-details.table-view th, details.table-view td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+details.table-view th, details.table-view td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); }
 details.table-view td.num, details.table-view th.num { text-align: right; font-variant-numeric: tabular-nums; }
 
 footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
@@ -728,6 +847,27 @@ document.addEventListener("DOMContentLoaded", function () {{
     }});
   }}
 }});
+</script>
+"""
+
+
+def _toolbar_height_script() -> str:
+    """Measure the real, current height of the sticky .subnav toolbar into a
+    --toolbar-height custom property, so .card's scroll-margin-top (used by
+    the jump-nav's anchor links) always clears it exactly - a fixed px guess
+    broke on mobile, where the toolbar wraps onto 2-3 rows and is 2-3x taller
+    than the single-row desktop layout. Re-measured on resize/orientation
+    change, since crossing the 700px breakpoint changes the row count.
+    """
+    return """
+<script>
+function updateToolbarHeight() {
+  var subnav = document.querySelector(".subnav");
+  if (!subnav) return;
+  document.documentElement.style.setProperty("--toolbar-height", (subnav.getBoundingClientRect().height + 16) + "px");
+}
+document.addEventListener("DOMContentLoaded", updateToolbarHeight);
+window.addEventListener("resize", updateToolbarHeight);
 </script>
 """
 
@@ -893,11 +1033,13 @@ def build_html_report(
     theme_traces: dict[str, dict] = {}
     location_data: dict[str, dict] = {}
     cards = []
+    rendered_targets: list[str] = []
     for target in targets:
         board_t = board[board["target"] == target]
         trend_t = trend[trend["target"] == target]
         if board_t.empty or trend_t.empty:
             continue
+        rendered_targets.append(target)
 
         board_id = f"board-{target}"
         trend_id = f"trend-{target}"
@@ -945,7 +1087,7 @@ def build_html_report(
         trend_div = trend_fig.to_html(full_html=False, include_plotlyjs=False, div_id=trend_id, config={"displayModeBar": False, "responsive": True})
 
         cards.append(
-            f"""<section class="card">
+            f"""<section class="card" id="card-{escape(target)}">
   <h2>{escape(TARGET_LABELS.get(target, target))}</h2>
   <p class="sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; bar/line order is fixed to the all-locations ranking</p>
   <div class="panels">
@@ -962,6 +1104,10 @@ def build_html_report(
 
     location_options = "".join(
         f'<option value="{escape(loc)}">{escape(loc)}</option>' for loc in location_names
+    )
+
+    jump_nav = "".join(
+        f'<a href="#card-{escape(target)}">{escape(TARGET_LABELS.get(target, target))}</a>' for target in rendered_targets
     )
 
     legend_key_entries = [
@@ -986,15 +1132,16 @@ def build_html_report(
 <body>
 <div class="wrap">
   <header class="top">
-    <div>
-      <h1>{escape(title)}</h1>
-      <p>Ensemble and ML predictions scored against observed weather, alongside every individual forecast source and two naive baselines.</p>
-      <div class="chip-row">
-        <span class="chip" id="location-chip">{n_locations} location(s) pooled</span>
-        <span class="chip">last {history_days}d &middot; {date_min} &rarr; {date_max}</span>
-        <span class="chip">generated {generated}</span>
-      </div>
+    <h1>{escape(title)}</h1>
+    <p>Ensemble and ML predictions scored against observed weather, alongside every individual forecast source and two naive baselines.</p>
+    <div class="chip-row">
+      <span class="chip" id="location-chip">{n_locations} location(s) pooled</span>
+      <span class="chip">last {history_days}d &middot; {date_min} &rarr; {date_max}</span>
+      <span class="chip">generated {generated}</span>
     </div>
+  </header>
+  <div class="subnav">
+    <nav class="jump-nav" aria-label="Jump to metric">{jump_nav}</nav>
     <div class="controls">
       <label class="baseline-toggle">
         <input type="checkbox" id="baseline-toggle" checked>
@@ -1006,7 +1153,7 @@ def build_html_report(
       </select>
       <button id="theme-toggle" class="theme-toggle" type="button">Dark mode</button>
     </div>
-  </header>
+  </div>
   {recent_forecast_html}
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
   <div class="legend-key">{legend_key}</div>
@@ -1016,6 +1163,7 @@ def build_html_report(
 {_theme_script(theme_traces)}
 {_controls_script(location_data)}
 {recent_forecast_script}
+{_toolbar_height_script()}
 </body>
 </html>"""
 
