@@ -94,6 +94,42 @@ def select_best_model(
     return best_model, {"mae": float(eligible.loc[best_model, "mae"]), "n": int(eligible.loc[best_model, "n"])}
 
 
+def rank_eligible_models(
+    pool: pd.DataFrame,
+    target: str,
+    target_date: date,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    min_days: int = DEFAULT_MIN_DAYS,
+) -> list[str]:
+    """Every eligible candidate for `target` as of target_date, best (lowest
+    MAE) first - same eligibility rule as select_best_model, but the full
+    order rather than just the winner.
+
+    _predictions_for_date walks this list and falls through to the next-
+    ranked candidate whenever the current one has no actual value for this
+    specific date - a real, if rare, case: a source that's been the most
+    accurate all month can still have a one-off collection gap on the exact
+    day being predicted (confirmed in practice - Melbourne's top wind/cloud/
+    pressure/precipitation performer was missing its own forecast row for a
+    single date, leaving those targets unfilled even though a perfectly good
+    second-best candidate had a value that day). Without this fallback,
+    "the single best candidate happened to be silent today" reads as a gap
+    in the chart, even though better information was available.
+    """
+    if pool.empty:
+        return []
+    window = pool[
+        (pool["target"] == target)
+        & (pool["forecast_date"] < pd.Timestamp(target_date))
+        & (pool["forecast_date"] >= pd.Timestamp(target_date) - pd.Timedelta(days=window_days))
+    ]
+    if window.empty:
+        return []
+    stats = window.groupby("model")["abs_error"].agg(mae="mean", n="count")
+    eligible = stats[stats["n"] >= min_days].sort_values("mae")
+    return list(eligible.index)
+
+
 def _latest_row(conn, table: str, location: Location, target_date: date):
     return conn.execute(
         f"SELECT * FROM {table} WHERE location_name = ? AND forecast_date = ? ORDER BY generated_at DESC LIMIT 1",
@@ -224,19 +260,26 @@ def _predictions_for_date(
     min_days: int,
     value_for: Callable[[str, str], float | None],
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """Shared per-target selection loop: pick a winner for every BEST_TARGETS
-    entry and look up its value via `value_for(model, target)` - the live and
-    backcast paths differ only in how that lookup is done (a DB query for
-    "tomorrow", vs. reading the already-scored `pool` for a past date).
+    """Shared per-target selection loop: for every BEST_TARGETS entry, walk
+    rank_eligible_models's order (best MAE first) and use the first candidate
+    whose value actually resolves via `value_for(model, target)` - not just
+    the single top-ranked one, since even a consistently-accurate candidate
+    can have a one-off gap on this exact date (see rank_eligible_models). The
+    live and backcast paths differ only in how that lookup is done (a DB
+    query for "tomorrow", vs. reading the already-scored `pool` for a past
+    date).
     """
     predictions: dict[str, Any] = {}
     chosen: dict[str, str] = {}
     for target in BEST_TARGETS:
-        model, _info = select_best_model(pool, target, target_date, window_days, min_days)
+        value = None
+        model = None
+        for candidate in rank_eligible_models(pool, target, target_date, window_days, min_days):
+            value = value_for(candidate, target)
+            if value is not None:
+                model = candidate
+                break
         if model is None:
-            continue
-        value = value_for(model, target)
-        if value is None:
             continue
         key = "did_rain_probability" if target == "did_rain" else target
         decimals = 3 if target == "did_rain" else 2

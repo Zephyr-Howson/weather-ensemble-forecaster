@@ -157,6 +157,40 @@ def test_predict_best_copies_the_winning_candidates_own_value(tmp_path):
     assert row["max_temp"] == 21.0
 
 
+def test_predict_best_falls_through_when_top_candidate_has_no_value_for_the_date(tmp_path):
+    """Even a candidate that's been the most accurate all month can have a
+    one-off collection gap on the exact date being predicted - Best must
+    fall through to the next-best eligible candidate rather than leaving
+    the target unfilled just because its #1 pick was silent today.
+    """
+    db_path = tmp_path / "weather.db"
+    start = date(2026, 6, 1)
+    history_days = [start + timedelta(days=i) for i in range(20)]
+    tomorrow = history_days[-1] + timedelta(days=1)
+
+    top_performer = "open_meteo_ecmwf_ifs025"
+    second_best = "open_meteo_gem_seamless"
+
+    with connect(db_path) as conn:
+        for day in history_days:
+            insert_forecasts(
+                conn,
+                [
+                    _forecast(top_performer, day, 20.05),  # abs_error ~0.05 - clearly the best all month
+                    _forecast(second_best, day, 20.5),  # abs_error ~0.5 - clearly second
+                ],
+            )
+            upsert_actual(conn, _actual(day, 20.0))
+        # Tomorrow: the top performer has a one-off collection gap (no forecast
+        # row at all) - only the second-best source actually has a value.
+        insert_forecasts(conn, [_forecast(second_best, tomorrow, 21.0)])
+
+    result = predict_best(db_path, LOCATION, window_days=30, min_days=14, target_date=tomorrow)
+
+    assert result["chosen_sources"]["max_temp"] == second_best
+    assert result["predictions"]["max_temp"] == 21.0
+
+
 def test_backtest_best_predictions_walk_forward(tmp_path):
     """Mirrors test_backtest_predictions_writes_ensemble_and_ml_rows: seed
     history plus one more day with only forecasts (no actual, no existing

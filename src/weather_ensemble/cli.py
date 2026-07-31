@@ -14,7 +14,7 @@ from weather_ensemble.backtest import (
     backtest_period_predictions,
     backtest_predictions,
 )
-from weather_ensemble.best import DEFAULT_MIN_DAYS, predict_best
+from weather_ensemble.best import DEFAULT_MIN_DAYS, DEFAULT_WINDOW_DAYS, predict_best
 from weather_ensemble.config import (
     AUSTRALIAN_LOCATIONS,
     PERIODS,
@@ -130,14 +130,24 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Generate tomorrow's adaptive 'Best' prediction: per target, copies whichever candidate "
         "(a raw source, Weighted, or ML) has had the lowest MAE in this location over the trailing "
-        "--window days (needs --best-min-days scored days to be eligible)",
+        "--best-window-days days (needs --best-min-days scored days to be eligible)",
+    )
+    parser.add_argument(
+        "--best-window-days",
+        type=int,
+        default=DEFAULT_WINDOW_DAYS,
+        help=f"Best's own trailing lookback (days) for ranking candidates - deliberately separate "
+        f"from --window (the Weighted blend's MAE-lookback, env-overridable via ROLLING_WINDOW_DAYS "
+        f"and often set much shorter) since reusing that flag here would silently make the min_days "
+        f"eligibility rule far stricter than intended whenever the two happen to end up equal "
+        f"(default {DEFAULT_WINDOW_DAYS})",
     )
     parser.add_argument(
         "--best-min-days",
         type=int,
         default=DEFAULT_MIN_DAYS,
-        help=f"Minimum scored days within --window required for a candidate to be eligible to win "
-        f"'Best' for a target (default {DEFAULT_MIN_DAYS})",
+        help=f"Minimum scored days within --best-window-days required for a candidate to be eligible "
+        f"to win 'Best' for a target (default {DEFAULT_MIN_DAYS})",
     )
     parser.add_argument(
         "--backtest-best-days",
@@ -352,14 +362,14 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         # needs this run's own fresh Weighted/ML predictions to already
         # exist if either of those turns out to be today's winning candidate.
         def _predict_best():
-            result = predict_best(args.db, location, window_days=args.window, min_days=args.best_min_days)
+            result = predict_best(args.db, location, window_days=args.best_window_days, min_days=args.best_min_days)
             _print_json(result)
         ok &= _guarded(location, "predict_best", _predict_best)
 
     if args.backtest_best_days:
         def _backtest_best():
             result = backtest_best_predictions(
-                args.db, location, days=args.backtest_best_days, window_days=args.window, min_days=args.best_min_days
+                args.db, location, days=args.backtest_best_days, window_days=args.best_window_days, min_days=args.best_min_days
             )
             _print_json(result)
         ok &= _guarded(location, "backtest_best", _backtest_best)

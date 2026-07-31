@@ -156,9 +156,17 @@ a missing-source data gap once let Ridge extrapolate a 467.9% prediction.
 Not a model of its own — for each target variable, independently, `best.py`
 picks whichever candidate (a raw source, Weighted, or ML) has had the lowest
 mean absolute error **in that specific location** over the trailing 30 days
-(`--window`), then copies that candidate's own forecast for tomorrow. A
-candidate needs at least 14 scored days (`--best-min-days`) in that window to
-be eligible — a lucky handful of days shouldn't be enough to win. Different
+(`--best-window-days` — deliberately its own flag, not `--window`: that one
+is the Weighted blend's own MAE-lookback and is env-overridable via
+`ROLLING_WINDOW_DAYS`, often to something much shorter; reusing it here
+would silently make the min_days eligibility rule far stricter than
+intended whenever the two happened to end up equal). A candidate needs at
+least 14 scored days (`--best-min-days`) in that window to be eligible — a
+lucky handful of days shouldn't be enough to win. If the top-ranked
+candidate turns out to have no actual value for the specific date being
+predicted (a one-off collection gap — even a candidate that's been the most
+accurate all month can miss a single day), Best falls through to the next-
+best eligible candidate rather than leaving the target unfilled. Different
 targets in the same location can (and routinely do) pick different winners —
 e.g. ECMWF for max temperature, Weighted for rain — and the winner can change
 day to day as each candidate's recent accuracy shifts. The two naive
@@ -289,7 +297,7 @@ every configured location instead of one `--lat/--lon/--name/--timezone`).
 | `--train` | Train the ML models (`--train-window` sets the training lookback, default 90) |
 | `--predict-ml` | Generate tomorrow's ML forecast |
 | `--backtest-days DAYS` | Walk-forward re-create both predictions for each of the past DAYS days |
-| `--predict-best` | Generate tomorrow's adaptive Best pick (`--best-min-days` sets the eligibility threshold, default 14) |
+| `--predict-best` | Generate tomorrow's adaptive Best pick (`--best-window-days` sets its lookback, default 30; `--best-min-days` sets the eligibility threshold, default 14) |
 | `--backtest-best-days DAYS` | Walk-forward re-create the Best pick for each of the past DAYS days |
 | `--dedupe` | Remove duplicate forecast/actual/prediction rows across the whole database |
 | `--accuracy-report PATH` | Build the interactive HTML dashboard |
