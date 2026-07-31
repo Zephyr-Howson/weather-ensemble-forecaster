@@ -489,11 +489,14 @@ def _display_name(model: str) -> str:
 
 def _bar_display_name(model: str) -> str:
     """Same as _display_name, except the leaderboard bars (and their table-view
-    twin) spell out "Weighted model" rather than just "Weighted" - the trend
-    chart's legend/hover and the recent-forecasts table keep the shorter form.
+    twin) spell out "Weighted model"/"Best model" rather than just "Weighted"/
+    "Best" - the trend chart's legend/hover and the recent-forecasts table
+    keep the shorter form.
     """
     if model == MODEL_ENSEMBLE:
         return "Weighted model"
+    if model == MODEL_BEST:
+        return "Best model"
     return _display_name(model)
 
 

@@ -12,6 +12,7 @@ from weather_ensemble.config import PERIODS, TARGETS, Location, get_periods_db_p
 from weather_ensemble.scoring import (
     BASELINE_CLIMATOLOGY,
     BASELINE_PERSISTENCE,
+    MODEL_BEST,
     MODEL_ENSEMBLE,
     MODEL_ML,
     build_predictions_long,
@@ -25,8 +26,16 @@ from weather_ensemble.service import latest_forecasts_for_date
 # show how much better real forecasting is than doing nothing, not as
 # strategies "Best" should ever adopt - if persistence really is winning,
 # that's a fact worth seeing on the baseline's own dashed line, not a value
-# worth copying into a hero series.
-_EXCLUDED_CANDIDATES = {BASELINE_PERSISTENCE, BASELINE_CLIMATOLOGY}
+# worth copying into a hero series. MODEL_BEST itself is also excluded - once
+# report.py wired Best's own history into build_predictions_long (so it can
+# appear on the leaderboard/trend charts), it became just another row in the
+# same long_df this candidate pool is built from, and without this exclusion
+# Best could nominate itself as a candidate for its own future selection.
+# That's not just conceptually circular - _candidate_value_live/_backtest_best
+# have no defined value to copy for "model == best" (it isn't a real source,
+# ensemble, or ml), so on the live path it would silently win and then
+# resolve to no value at all, leaving that target unfilled.
+_EXCLUDED_CANDIDATES = {BASELINE_PERSISTENCE, BASELINE_CLIMATOLOGY, MODEL_BEST}
 
 DEFAULT_WINDOW_DAYS = 30
 DEFAULT_MIN_DAYS = 14
