@@ -678,14 +678,16 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   margin: 0 0 20px;
   padding: 10px 0;
   display: flex;
-  flex-wrap: wrap;
-  gap: 10px 16px;
-  align-items: center;
+  flex-direction: column;
+  gap: 10px;
 }
+/* Its own full-width row rather than sharing one with the filter controls -
+   at 13+ metrics the jump-nav needs the whole toolbar's width to show more
+   than a handful of pills before scrolling; squeezed next to the location/
+   baseline/theme controls it was cutting pills off mid-word. */
 .jump-nav {
   display: flex;
   gap: 6px;
-  flex: 1 1 320px;
   min-width: 0;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
@@ -712,7 +714,7 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
 }
 
-.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; flex: 0 0 auto; }
+.controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .theme-toggle {
   border: 1px solid var(--border); background: var(--page-plane); color: var(--text-secondary);
   border-radius: 8px; padding: 8px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
@@ -734,11 +736,20 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 .location-field-label { font-size: 12.5px; font-weight: 600; color: var(--text-secondary); white-space: nowrap; }
 .location-field.is-filtered .location-field-label { color: #2a78d6; }
 .location-select {
-  border: none; background: transparent; color: var(--text-primary);
+  /* A transparent background here doesn't just blend into .location-field
+     for the closed control - the browser reuses the exact same
+     background/color pair to paint the native options popup. Transparent
+     falls back to the popup's own opaque default (often white) while
+     `color` stays var(--text-primary) - white-on-white in dark mode, so the
+     option list is unreadable. Giving it the same solid --page-plane as its
+     wrapper keeps the closed look identical while making the popup itself
+     theme-correct. */
+  border: none; background: var(--page-plane); color: var(--text-primary);
   font-family: inherit; font-size: 12.5px; cursor: pointer; padding: 0;
   flex: 1 1 auto; min-width: 130px;
 }
 .location-select:focus { outline: none; }
+.location-select option { background: var(--page-plane); color: var(--text-primary); }
 .baseline-toggle {
   display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text-secondary);
   border: 1px solid var(--border); background: var(--page-plane); border-radius: 8px;
@@ -746,17 +757,9 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 }
 .baseline-toggle input { margin: 0; cursor: pointer; width: 16px; height: 16px; }
 
-/* Below ~700px the toolbar stacks: jump-nav keeps its own horizontally-
-   scrollable row (still reachable with a thumb-swipe), filters wrap onto
-   their own full-width row underneath with 44px-tall touch targets. */
+/* Below ~700px each control becomes its own full-width row with a
+   44px-tall touch target, instead of a wrapped cluster of small pills. */
 @media (max-width: 700px) {
-  /* flex-wrap must switch to nowrap here - flex-direction:column with the
-     base row's wrap:wrap left over stops align-items:stretch from working,
-     so the two children rendered at their intrinsic content width instead of
-     the container's, and the whole page scrolled horizontally to show them. */
-  .subnav { flex-direction: column; align-items: stretch; flex-wrap: nowrap; }
-  .jump-nav { order: 1; flex-basis: auto; }
-  .controls { order: 2; flex-wrap: wrap; }
   .controls > * { flex: 1 1 auto; min-height: 44px; }
 }
 
