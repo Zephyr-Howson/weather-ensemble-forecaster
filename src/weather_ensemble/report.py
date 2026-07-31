@@ -792,9 +792,9 @@ body {
 @media (max-width: 640px) { .wrap { padding: 18px 14px 56px; } }
 
 header.top { margin-bottom: 18px; }
-header.top h1 { font-size: 21px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; }
+header.top h1 { font-size: 24px; font-weight: 700; margin: 0 0 6px; letter-spacing: -0.01em; }
 header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
-@media (max-width: 640px) { header.top h1 { font-size: 18px; } header.top p { font-size: 13px; } }
+@media (max-width: 640px) { header.top h1 { font-size: 20px; } header.top p { font-size: 13px; } }
 .chip-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
 .chip {
   font-size: 12px; color: var(--text-secondary); background: var(--surface-1);
