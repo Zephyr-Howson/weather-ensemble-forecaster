@@ -61,11 +61,10 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 
 .section-sub { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 14px; }
 
-/* Sticky toolbar: jump-nav (scopes which card you jump to) + filters (scope
-   every chart below them - see dataviz skill's interaction.md) stay reachable
-   the whole way down what is otherwise a very long, many-card page, instead
-   of forcing a scroll back to the top every time you want to switch location
-   or find a different metric. */
+/* Sticky filter bar: Location/baselines/theme scope every chart on the page
+   (Recent forecasts included, via the location dropdown), so it stays right
+   under the header - reachable without hunting for it - rather than living
+   inside the Historical accuracy section it doesn't exclusively belong to. */
 .subnav {
   position: sticky;
   top: 0;
@@ -74,14 +73,21 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   border-bottom: 1px solid var(--border);
   margin: 0 0 20px;
   padding: 10px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
-/* Its own full-width row rather than sharing one with the filter controls -
-   at 13+ metrics the jump-nav needs the whole toolbar's width to show more
-   than a handful of pills before scrolling; squeezed next to the location/
-   baseline/theme controls it was cutting pills off mid-word. */
+/* The jump-nav is scoped entirely to Historical accuracy's cards, so it lives
+   there instead - its own sticky bar, pinned just below the filter bar above
+   (top: var(--subnav-height), kept in sync by updateToolbarHeight) so it's
+   still reachable while scrolling through 13+ cards without following you
+   around the Recent forecasts section it has nothing to do with. */
+.section-nav {
+  position: sticky;
+  top: var(--subnav-height, 56px);
+  z-index: 15;
+  background: var(--page-plane);
+  border-bottom: 1px solid var(--border);
+  margin: 0 0 16px;
+  padding: 10px 0;
+}
 .jump-nav {
   display: flex;
   gap: 6px;
@@ -255,11 +261,10 @@ footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
     <div class="chip-row">
       <span class="chip" id="location-chip">30 location(s) pooled</span>
       <span class="chip">last 90d &middot; 2026-05-02 &rarr; 2026-07-30</span>
-      <span class="chip">generated 2026-07-31T01:58</span>
+      <span class="chip">generated 2026-07-31T02:06</span>
     </div>
   </header>
   <div class="subnav">
-    <nav class="jump-nav" aria-label="Jump to metric"><a href="#card-max_temp">Max temperature</a><a href="#card-min_temp">Min temperature</a><a href="#card-did_rain">Rain</a><a href="#card-precipitation_sum">Precipitation</a><a href="#card-precipitation_sum_overnight">Precipitation — Overnight</a><a href="#card-precipitation_sum_morning">Precipitation — Morning</a><a href="#card-precipitation_sum_afternoon">Precipitation — Afternoon</a><a href="#card-precipitation_sum_evening">Precipitation — Evening</a><a href="#card-wind_speed">Wind speed</a><a href="#card-wind_gusts">Wind gusts</a><a href="#card-cloud_cover">Cloud cover</a><a href="#card-humidity">Humidity</a><a href="#card-pressure_msl">Pressure (MSL)</a></nav>
     <div class="controls">
       <label class="location-field">
         <span class="location-field-label">Location</span>
@@ -317,6 +322,9 @@ footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
 </section>
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
   <p class="section-sub">Last 30d leaderboard &middot; 7d rolling MAE over time &middot; bar/line order stays fixed to the all-locations ranking when you switch locations.</p>
+  <div class="section-nav">
+    <nav class="jump-nav" aria-label="Jump to metric"><a href="#card-max_temp">Max temperature</a><a href="#card-min_temp">Min temperature</a><a href="#card-did_rain">Rain</a><a href="#card-precipitation_sum">Precipitation</a><a href="#card-precipitation_sum_overnight">Precipitation — Overnight</a><a href="#card-precipitation_sum_morning">Precipitation — Morning</a><a href="#card-precipitation_sum_afternoon">Precipitation — Afternoon</a><a href="#card-precipitation_sum_evening">Precipitation — Evening</a><a href="#card-wind_speed">Wind speed</a><a href="#card-wind_gusts">Wind gusts</a><a href="#card-cloud_cover">Cloud cover</a><a href="#card-humidity">Humidity</a><a href="#card-pressure_msl">Pressure (MSL)</a></nav>
+  </div>
   <div class="legend-key" id="legend-key"><span><span class='swatch' style='background:#2a78d6'></span>Weighted</span><span><span class='swatch' style='background:#008300'></span>ML model</span><span><span class='swatch swatch-gradient'></span>Individual forecast sources</span><span id="legend-baselines" style="display:none"><span><span class='swatch' style='background:#52514e'></span>Baseline: persistence</span><span><span class='swatch' style='background:#52514e'></span>Baseline: 30d trailing average</span></span></div>
   <section class="card" id="card-max_temp">
   <h2>Max temperature</h2>
@@ -1054,8 +1062,12 @@ document.addEventListener("DOMContentLoaded", function () {
 <script>
 function updateToolbarHeight() {
   var subnav = document.querySelector(".subnav");
+  var sectionNav = document.querySelector(".section-nav");
   if (!subnav) return;
-  document.documentElement.style.setProperty("--toolbar-height", (subnav.getBoundingClientRect().height + 16) + "px");
+  var subnavHeight = subnav.getBoundingClientRect().height;
+  var sectionNavHeight = sectionNav ? sectionNav.getBoundingClientRect().height : 0;
+  document.documentElement.style.setProperty("--subnav-height", subnavHeight + "px");
+  document.documentElement.style.setProperty("--toolbar-height", (subnavHeight + sectionNavHeight + 16) + "px");
 }
 // Only fades a horizontally-scrolling strip's trailing edge when it
 // actually has more content past the visible area - an unconditional fade

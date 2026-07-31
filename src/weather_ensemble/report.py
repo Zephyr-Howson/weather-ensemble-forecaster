@@ -664,11 +664,10 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 
 .section-sub { font-size: 12.5px; color: var(--text-secondary); margin: 0 0 14px; }
 
-/* Sticky toolbar: jump-nav (scopes which card you jump to) + filters (scope
-   every chart below them - see dataviz skill's interaction.md) stay reachable
-   the whole way down what is otherwise a very long, many-card page, instead
-   of forcing a scroll back to the top every time you want to switch location
-   or find a different metric. */
+/* Sticky filter bar: Location/baselines/theme scope every chart on the page
+   (Recent forecasts included, via the location dropdown), so it stays right
+   under the header - reachable without hunting for it - rather than living
+   inside the Historical accuracy section it doesn't exclusively belong to. */
 .subnav {
   position: sticky;
   top: 0;
@@ -677,14 +676,21 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   border-bottom: 1px solid var(--border);
   margin: 0 0 20px;
   padding: 10px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
-/* Its own full-width row rather than sharing one with the filter controls -
-   at 13+ metrics the jump-nav needs the whole toolbar's width to show more
-   than a handful of pills before scrolling; squeezed next to the location/
-   baseline/theme controls it was cutting pills off mid-word. */
+/* The jump-nav is scoped entirely to Historical accuracy's cards, so it lives
+   there instead - its own sticky bar, pinned just below the filter bar above
+   (top: var(--subnav-height), kept in sync by updateToolbarHeight) so it's
+   still reachable while scrolling through 13+ cards without following you
+   around the Recent forecasts section it has nothing to do with. */
+.section-nav {
+  position: sticky;
+  top: var(--subnav-height, 56px);
+  z-index: 15;
+  background: var(--page-plane);
+  border-bottom: 1px solid var(--border);
+  margin: 0 0 16px;
+  padding: 10px 0;
+}
 .jump-nav {
   display: flex;
   gap: 6px;
@@ -902,19 +908,27 @@ document.addEventListener("DOMContentLoaded", function () {{
 
 
 def _toolbar_height_script() -> str:
-    """Measure the real, current height of the sticky .subnav toolbar into a
-    --toolbar-height custom property, so .card's scroll-margin-top (used by
-    the jump-nav's anchor links) always clears it exactly - a fixed px guess
-    broke on mobile, where the toolbar wraps onto 2-3 rows and is 2-3x taller
-    than the single-row desktop layout. Re-measured on resize/orientation
-    change, since crossing the 700px breakpoint changes the row count.
+    """Measure the two stacked sticky bars - .subnav (filters, pinned at the
+    very top) and .section-nav (the jump-nav, pinned just below it once
+    scrolled that far) - into custom properties: --subnav-height positions
+    .section-nav directly under .subnav with no gap or overlap, and
+    --toolbar-height (their combined height) is what .card's scroll-margin-top
+    needs so a jump-nav anchor click clears BOTH bars, not just one. A fixed
+    px guess for either broke on mobile, where .subnav wraps onto 2-3 rows
+    and is 2-3x taller than the single-row desktop layout. Re-measured on
+    resize/orientation change, since crossing the 700px breakpoint changes
+    the row count.
     """
     return """
 <script>
 function updateToolbarHeight() {
   var subnav = document.querySelector(".subnav");
+  var sectionNav = document.querySelector(".section-nav");
   if (!subnav) return;
-  document.documentElement.style.setProperty("--toolbar-height", (subnav.getBoundingClientRect().height + 16) + "px");
+  var subnavHeight = subnav.getBoundingClientRect().height;
+  var sectionNavHeight = sectionNav ? sectionNav.getBoundingClientRect().height : 0;
+  document.documentElement.style.setProperty("--subnav-height", subnavHeight + "px");
+  document.documentElement.style.setProperty("--toolbar-height", (subnavHeight + sectionNavHeight + 16) + "px");
 }
 // Only fades a horizontally-scrolling strip's trailing edge when it
 // actually has more content past the visible area - an unconditional fade
@@ -1220,7 +1234,6 @@ def build_html_report(
     </div>
   </header>
   <div class="subnav">
-    <nav class="jump-nav" aria-label="Jump to metric">{jump_nav}</nav>
     <div class="controls">
       <label class="location-field">
         <span class="location-field-label">Location</span>
@@ -1239,6 +1252,9 @@ def build_html_report(
   {recent_forecast_html}
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
   <p class="section-sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; bar/line order stays fixed to the all-locations ranking when you switch locations.</p>
+  <div class="section-nav">
+    <nav class="jump-nav" aria-label="Jump to metric">{jump_nav}</nav>
+  </div>
   <div class="legend-key" id="legend-key">{legend_key_hero}{legend_key_raw}<span id="legend-baselines" style="display:none">{legend_key_baselines}</span></div>
   {''.join(cards)}
   <footer>Lower is better for every metric shown. Rain is scored as % chance of rain against the binary rain/no-rain outcome (mean absolute error between the forecast probability and the 0/1 actual); every other metric is mean absolute error in its native unit.</footer>
