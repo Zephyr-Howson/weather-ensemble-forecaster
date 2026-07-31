@@ -518,25 +518,26 @@ def _trend_figure(
     silently misalign the real values against the wrong dates instead of
     erroring - exactly the bug that made a partial-history line (like the
     ensemble/ML backtest, or a single-sample source) vanish or scramble.
+
+    No on-chart legend: the leaderboard bar chart right beside this one
+    already labels every model/source by name using the exact same color
+    mapping, so a second legend here would just repeat it. Trace `name` is
+    kept (not decorative) - it's what the unified hover tooltip uses to label
+    each line's value.
     """
     fig = go.Figure()
     colors_light: list[str] = []
     colors_dark: list[str] = []
-    legend_seen: set[str] = set()
     x = pd.to_datetime(date_index)
 
     for model, y in zip(model_order, series_by_model):
         style = _style_for(model, raw_colors)
-        show = style["legend"] not in legend_seen
-        legend_seen.add(style["legend"])
         fig.add_trace(
             go.Scatter(
                 x=x,
                 y=y,
                 mode="lines",
                 name=style["legend"],
-                legendgroup=style["legend"],
-                showlegend=show,
                 opacity=style["opacity"],
                 line={"color": style["light"], "width": style["width"], "dash": style["dash"]},
                 hovertemplate=f"{escape(_display_name(model))}: %{{y:.3f}}<extra></extra>",
@@ -546,11 +547,7 @@ def _trend_figure(
         colors_dark.append(style["dark"])
 
     _axis_layout(fig)
-    fig.update_layout(
-        showlegend=True,
-        legend={"orientation": "h", "yanchor": "bottom", "y": 1.02, "xanchor": "left", "x": 0, "font": {"size": 11}},
-    )
-    fig.update_layout(hovermode="x unified", height=height, margin={"l": 48, "r": 16, "t": 48, "b": 36})
+    fig.update_layout(hovermode="x unified", height=height, margin={"l": 48, "r": 16, "t": 16, "b": 36})
     fig.update_yaxes(title_text="rolling MAE", showgrid=True, rangemode="tozero")
     return fig, colors_light, colors_dark
 
@@ -930,6 +927,9 @@ function renderCharts() {{
     }}
   }});
 
+  var legendKey = document.getElementById("legend-key");
+  if (legendKey) legendKey.style.display = showBaselines ? "" : "none";
+
   var chip = document.getElementById("location-chip");
   if (chip) chip.textContent = loc === "__ALL__" ? "all locations pooled" : "viewing " + loc;
   localStorage.setItem("weather-report-location", loc);
@@ -1110,14 +1110,15 @@ def build_html_report(
         f'<a href="#card-{escape(target)}">{escape(TARGET_LABELS.get(target, target))}</a>' for target in rendered_targets
     )
 
-    legend_key_entries = [
-        *HERO_STYLE.values(),
-        *BASELINE_STYLE.values(),
-        {"legend": RAW_SOURCE_LEGEND, "light": _hex_lerp(*RAW_SOURCE_GRADIENT_LIGHT, 0.5)},
-    ]
+    # Weighted/ML/raw-source names are already visible as the leaderboard bar
+    # chart's own category labels, in the same colors used everywhere else -
+    # a second legend for those would just repeat it. Baselines are the one
+    # thing the bar chart doesn't disambiguate (dashed vs dotted isn't a bar
+    # property), so they're the only entries kept here, and only relevant
+    # (shown) while the baseline toggle is actually on - see renderCharts.
     legend_key = "".join(
         f"<span><span class='swatch' style='background:{style['light']}'></span>{escape(style['legend'])}</span>"
-        for style in legend_key_entries
+        for style in BASELINE_STYLE.values()
     )
 
     html = f"""<!doctype html>
@@ -1144,7 +1145,7 @@ def build_html_report(
     <nav class="jump-nav" aria-label="Jump to metric">{jump_nav}</nav>
     <div class="controls">
       <label class="baseline-toggle">
-        <input type="checkbox" id="baseline-toggle" checked>
+        <input type="checkbox" id="baseline-toggle">
         Show baselines
       </label>
       <select id="location-select" class="location-select">
@@ -1156,7 +1157,7 @@ def build_html_report(
   </div>
   {recent_forecast_html}
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
-  <div class="legend-key">{legend_key}</div>
+  <div class="legend-key" id="legend-key" style="display:none">{legend_key}</div>
   {''.join(cards)}
   <footer>Lower is better for every metric shown. Rain is scored as % chance of rain against the binary rain/no-rain outcome (mean absolute error between the forecast probability and the 0/1 actual); every other metric is mean absolute error in its native unit. Bar/line order stays fixed to the all-locations ranking when you switch locations, so series don't jump around.</footer>
 </div>
