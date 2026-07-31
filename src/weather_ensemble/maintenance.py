@@ -32,6 +32,10 @@ _DEDUPE_SPECS = {
         "partition": ["location_name", "forecast_date"],
         "order": "generated_at DESC",
     },
+    "best_predictions": {
+        "partition": ["location_name", "forecast_date"],
+        "order": "generated_at DESC",
+    },
 }
 
 # Same idea, one level finer - every period table's identity additionally
@@ -51,6 +55,10 @@ _PERIOD_DEDUPE_SPECS = {
         "order": "generated_at DESC",
     },
     "ml_predictions_periods": {
+        "partition": ["location_name", "forecast_date", "period"],
+        "order": "generated_at DESC",
+    },
+    "best_predictions_periods": {
         "partition": ["location_name", "forecast_date", "period"],
         "order": "generated_at DESC",
     },

@@ -172,6 +172,36 @@ def init_db(conn: sqlite3.Connection) -> None:
             metadata_json TEXT,
             UNIQUE(location_name, forecast_date, generated_at)
         );
+
+        -- Per (location, target) adaptive pick: whichever candidate (a raw
+        -- source, the Weighted blend, or the ML model - see best.py) had the
+        -- lowest MAE for that one target over the trailing window_days days,
+        -- with at least min_days scored days required to be eligible. Each
+        -- target column can therefore come from a different underlying
+        -- candidate on any given day; did_rain_probability is always a 0-1
+        -- fraction (mirrors ml_predictions.did_rain_probability), not the
+        -- 0-100 rain_probability raw sources/the ensemble use.
+        CREATE TABLE IF NOT EXISTS best_predictions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location_name TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            forecast_date TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            window_days INTEGER NOT NULL,
+            min_days INTEGER NOT NULL,
+            max_temp REAL,
+            min_temp REAL,
+            precipitation_sum REAL,
+            did_rain_probability REAL,
+            wind_speed REAL,
+            wind_gusts REAL,
+            cloud_cover REAL,
+            humidity REAL,
+            pressure_msl REAL,
+            metadata_json TEXT,
+            UNIQUE(location_name, forecast_date, generated_at)
+        );
         """
     )
 
@@ -272,6 +302,27 @@ def init_periods_db(conn: sqlite3.Connection) -> None:
             period TEXT NOT NULL,
             generated_at TEXT NOT NULL,
             model_version TEXT NOT NULL,
+            precipitation_sum REAL,
+            metadata_json TEXT,
+            UNIQUE(location_name, forecast_date, period, generated_at)
+        );
+
+        -- Best's period breakdown always inherits whichever candidate won the
+        -- *daily* precipitation_sum target for this date (see best.py) - never
+        -- independently re-selected per period - so these four rows sum to
+        -- that same candidate's own daily total exactly the way its own
+        -- numbers already do (or, for ensemble/ml, already have been
+        -- reconciled to - see service.reconcile_period_predictions).
+        CREATE TABLE IF NOT EXISTS best_predictions_periods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location_name TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            forecast_date TEXT NOT NULL,
+            period TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            window_days INTEGER NOT NULL,
+            min_days INTEGER NOT NULL,
             precipitation_sum REAL,
             metadata_json TEXT,
             UNIQUE(location_name, forecast_date, period, generated_at)

@@ -8,6 +8,15 @@ from typing import Any
 import pandas as pd
 
 from weather_ensemble import db
+from weather_ensemble.best import (
+    DEFAULT_MIN_DAYS,
+    DEFAULT_WINDOW_DAYS,
+    _insert_best_period_predictions,
+    _insert_best_prediction,
+    _period_values_for_model,
+    _predictions_for_date,
+    candidate_pool,
+)
 from weather_ensemble.config import Location, get_periods_db_path
 from weather_ensemble.ml import (
     CLASSIFICATION_TARGETS,
@@ -19,6 +28,7 @@ from weather_ensemble.ml import (
     clip_prediction,
     features_for_target,
 )
+from weather_ensemble.scoring import build_predictions_long
 from weather_ensemble.service import (
     blend_period_precipitation,
     blend_weighted,
@@ -365,4 +375,91 @@ def backtest_predictions(
         "date_range": [target_dates[0].isoformat(), target_dates[-1].isoformat()],
         "ensemble": {k: len(v) for k, v in ensemble_results.items()},
         "ml": {k: len(v) for k, v in ml_results.items()},
+    }
+
+
+def _backtest_best(
+    conn: sqlite3.Connection,
+    periods_conn: sqlite3.Connection,
+    location: Location,
+    pool: pd.DataFrame,
+    target_date,
+    window_days: int,
+    min_days: int,
+    existing: set[str],
+) -> str:
+    d_iso = target_date.isoformat()
+    if d_iso in existing:
+        return "skipped_existing"
+
+    def value_for(model: str, target: str):
+        """The winning candidate's own scored prediction at target_date -
+        target_date is a past date with a known actual, so (unlike the live
+        'tomorrow' path in best.py) the value is already sitting in `pool`
+        rather than needing a fresh DB lookup.
+        """
+        row = pool[
+            (pool["model"] == model) & (pool["target"] == target) & (pool["forecast_date"] == pd.Timestamp(target_date))
+        ]
+        return None if row.empty else float(row["predicted"].iloc[0])
+
+    predictions, chosen = _predictions_for_date(pool, target_date, window_days, min_days, value_for)
+    if not predictions:
+        return "skipped_no_eligible_candidate"
+
+    generated_at = _generated_at_for(target_date)
+    _insert_best_prediction(conn, location, d_iso, generated_at, window_days, min_days, predictions)
+
+    if "precipitation_sum" in chosen:
+        period_values = _period_values_for_model(periods_conn, location, chosen["precipitation_sum"], target_date)
+        if any(v is not None for v in period_values.values()):
+            _insert_best_period_predictions(periods_conn, location, d_iso, generated_at, window_days, min_days, period_values)
+
+    return "written"
+
+
+def backtest_best_predictions(
+    db_path: Path,
+    location: Location,
+    days: int,
+    window_days: int = DEFAULT_WINDOW_DAYS,
+    min_days: int = DEFAULT_MIN_DAYS,
+) -> dict[str, Any]:
+    """Regenerate the adaptive 'Best' pick for each of the past `days` days, walk-forward.
+
+    For target date D and each target independently, select_best_model only
+    ever ranks candidates using rows with forecast_date < D (see best.py), so
+    nothing D "shouldn't know yet" leaks in - the same walk-forward rule
+    backtest_predictions already applies to ensemble/ML. Dates that already
+    have a prediction are left untouched; this only fills gaps.
+    """
+    # Unbounded, not window_days-bounded: build_predictions_long's window_days
+    # cutoff is relative to *today*, not to any particular target_date - for
+    # a walk-forward over many past dates (the earliest of which can be
+    # months before today) that cutoff would silently exclude exactly the
+    # history the earliest dates' own eligibility windows need. Matches
+    # backtest_predictions's identical unbounded fetch for the same reason.
+    long_df = build_predictions_long(db_path, [location])
+    pool = candidate_pool(long_df)
+    if pool.empty:
+        return {"location": location.name, "error": "No modelling rows available."}
+    pool = pool.copy()
+    pool["forecast_date"] = pd.to_datetime(pool["forecast_date"])
+
+    max_date = pool["forecast_date"].max().date()
+    target_dates = sorted(max_date - timedelta(days=i) for i in range(days))
+
+    with db.connect(db_path) as conn, db.connect_periods(get_periods_db_path(db_path)) as periods_conn:
+        existing = _existing_forecast_dates(conn, "best_predictions", location)
+        results: dict[str, list[str]] = {}
+        for target_date in target_dates:
+            outcome = _backtest_best(conn, periods_conn, location, pool, target_date, window_days, min_days, existing)
+            results.setdefault(outcome, []).append(target_date.isoformat())
+        conn.commit()
+        periods_conn.commit()
+
+    return {
+        "location": location.name,
+        "date_range": [target_dates[0].isoformat(), target_dates[-1].isoformat()],
+        "best": {k: len(v) for k, v in results.items()},
     }

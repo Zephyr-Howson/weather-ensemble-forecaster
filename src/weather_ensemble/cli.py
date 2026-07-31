@@ -9,7 +9,8 @@ from pathlib import Path
 import pandas as pd
 
 from weather_ensemble.archive import archive_old_forecasts, export_blob_backlog
-from weather_ensemble.backtest import backtest_period_predictions, backtest_predictions
+from weather_ensemble.backtest import backtest_best_predictions, backtest_period_predictions, backtest_predictions
+from weather_ensemble.best import DEFAULT_MIN_DAYS, predict_best
 from weather_ensemble.config import (
     AUSTRALIAN_LOCATIONS,
     PERIODS,
@@ -118,6 +119,27 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         metavar="DAYS",
         help="Walk-forward: regenerate ensemble+ML predictions for each of the past DAYS days, "
+        "using only data available before that date. Skips dates that already have a prediction.",
+    )
+    parser.add_argument(
+        "--predict-best",
+        action="store_true",
+        help="Generate tomorrow's adaptive 'Best' prediction: per target, copies whichever candidate "
+        "(a raw source, Weighted, or ML) has had the lowest MAE in this location over the trailing "
+        "--window days (needs --best-min-days scored days to be eligible)",
+    )
+    parser.add_argument(
+        "--best-min-days",
+        type=int,
+        default=DEFAULT_MIN_DAYS,
+        help=f"Minimum scored days within --window required for a candidate to be eligible to win "
+        f"'Best' for a target (default {DEFAULT_MIN_DAYS})",
+    )
+    parser.add_argument(
+        "--backtest-best-days",
+        type=int,
+        metavar="DAYS",
+        help="Walk-forward: regenerate the adaptive 'Best' prediction for each of the past DAYS days, "
         "using only data available before that date. Skips dates that already have a prediction.",
     )
     parser.add_argument(
@@ -320,6 +342,24 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
             _print_json(result)
         ok &= _guarded(location, "backtest", _backtest)
 
+    if args.predict_best:
+        # Runs after --forecast/--predict-ml above, since it only ever
+        # copies an already-computed candidate's value for tomorrow - it
+        # needs this run's own fresh Weighted/ML predictions to already
+        # exist if either of those turns out to be today's winning candidate.
+        def _predict_best():
+            result = predict_best(args.db, location, window_days=args.window, min_days=args.best_min_days)
+            _print_json(result)
+        ok &= _guarded(location, "predict_best", _predict_best)
+
+    if args.backtest_best_days:
+        def _backtest_best():
+            result = backtest_best_predictions(
+                args.db, location, days=args.backtest_best_days, window_days=args.window, min_days=args.best_min_days
+            )
+            _print_json(result)
+        ok &= _guarded(location, "backtest_best", _backtest_best)
+
     if args.collect_periods:
         def _collect_periods():
             n = collect_forecast_periods(args.db, location)
@@ -406,6 +446,8 @@ def main() -> None:
         args.predict_ml,
         args.deploy_phases,
         args.backtest_days,
+        args.predict_best,
+        args.backtest_best_days,
         args.collect_periods,
         args.record_actual_periods,
         args.forecast_periods,

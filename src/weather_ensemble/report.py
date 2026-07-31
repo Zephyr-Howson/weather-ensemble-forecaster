@@ -19,6 +19,7 @@ from weather_ensemble.config import (
 from weather_ensemble.scoring import (
     BASELINE_CLIMATOLOGY,
     BASELINE_PERSISTENCE,
+    MODEL_BEST,
     MODEL_ENSEMBLE,
     MODEL_ML,
     leaderboard,
@@ -163,6 +164,11 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
                     "ORDER BY generated_at DESC LIMIT 1",
                     (location.name, d_iso),
                 ).fetchone()
+                best = conn.execute(
+                    "SELECT * FROM best_predictions WHERE location_name = ? AND forecast_date = ? "
+                    "ORDER BY generated_at DESC LIMIT 1",
+                    (location.name, d_iso),
+                ).fetchone()
                 actual = conn.execute(
                     "SELECT * FROM actuals WHERE location_name = ? AND actual_date = ? "
                     "ORDER BY collected_at DESC LIMIT 1",
@@ -171,6 +177,11 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
 
                 ensemble_values = {t: (ens[t] if ens is not None else None) for t in RECENT_TARGETS if t in TARGETS}
                 ml_values = {t: (ml[t] if ml is not None else None) for t in RECENT_TARGETS if t in TARGETS}
+                # best_predictions has no did_rain column at all (only
+                # did_rain_probability, see db.py) - excluded from this generic
+                # pull rather than raising, and set explicitly below like the
+                # other two models' rain field.
+                best_values = {t: (best[t] if best is not None else None) for t in RECENT_TARGETS if t in TARGETS and t != "did_rain"}
                 actual_values = {t: (actual[t] if actual is not None else None) for t in RECENT_TARGETS if t in TARGETS}
 
                 # "Rain" is a % chance forecast now (still scored against the
@@ -182,6 +193,8 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
                     ensemble_values["did_rain"] = round(ens["rain_probability"] / 100.0, 3)
                 if ml is not None and ml["did_rain_probability"] is not None:
                     ml_values["did_rain"] = ml["did_rain_probability"]
+                if best is not None and best["did_rain_probability"] is not None:
+                    best_values["did_rain"] = best["did_rain_probability"]
 
                 # Sub-daily rain periods live in a separate DB/tables (see
                 # get_periods_db_path) keyed by (location, date, period)
@@ -202,6 +215,12 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
                         "ORDER BY generated_at DESC LIMIT 1",
                         (location.name, d_iso, period),
                     ).fetchone()
+                    best_p = period_conn.execute(
+                        "SELECT precipitation_sum FROM best_predictions_periods "
+                        "WHERE location_name = ? AND forecast_date = ? AND period = ? "
+                        "ORDER BY generated_at DESC LIMIT 1",
+                        (location.name, d_iso, period),
+                    ).fetchone()
                     actual_p = period_conn.execute(
                         "SELECT precipitation_sum FROM actual_periods "
                         "WHERE location_name = ? AND actual_date = ? AND period = ? "
@@ -210,6 +229,7 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
                     ).fetchone()
                     ensemble_values[key] = ens_p["precipitation_sum"] if ens_p is not None else None
                     ml_values[key] = ml_p["precipitation_sum"] if ml_p is not None else None
+                    best_values[key] = best_p["precipitation_sum"] if best_p is not None else None
                     actual_values[key] = actual_p["precipitation_sum"] if actual_p is not None else None
 
                 days.append(
@@ -217,6 +237,7 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
                         "date": d_iso,
                         "ensemble": ensemble_values,
                         "ml": ml_values,
+                        "best": best_values,
                         "actual": actual_values,
                     }
                 )
@@ -252,6 +273,7 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
             f"<tr><td>{escape(TARGET_LABELS.get(t, t))}</td>"
             f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ensemble'>{escape(_format_recent_value(t, day['ensemble'].get(t), 'ensemble'))}</td>"
             f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ml'>{escape(_format_recent_value(t, day['ml'].get(t), 'ml'))}</td>"
+            f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='best'>{escape(_format_recent_value(t, day['best'].get(t), 'best'))}</td>"
             f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='actual'>{escape(_format_recent_value(t, day['actual'].get(t), 'actual'))}</td>"
             "</tr>"
             for t in RECENT_TARGETS
@@ -261,8 +283,8 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
             f"""<div class="recent-day-card" data-day-panel="{day_idx}"{hidden_attr}>
   <h3 data-day-label="{day_idx}">{escape(day["date"])}</h3>
   <table>
-    <colgroup><col class="col-metric"><col class="col-num"><col class="col-num"><col class="col-num"></colgroup>
-    <thead><tr><th>Metric</th><th class="num">Weighted</th><th class="num">ML</th><th class="num">Actual</th></tr></thead>
+    <colgroup><col class="col-metric"><col class="col-num"><col class="col-num"><col class="col-num"><col class="col-num"></colgroup>
+    <thead><tr><th>Metric</th><th class="num">Weighted</th><th class="num">ML</th><th class="num">Best</th><th class="num">Actual</th></tr></thead>
     <tbody>{rows}</tbody>
   </table>
 </div>"""
@@ -355,6 +377,25 @@ HERO_STYLE = {
         "width": 2.5,
         "opacity": 1.0,
     },
+    # Purple, per-mode-shifted (not a straight light/dark pair like the other
+    # two heroes) - a manual OKLab check against this exact blue found that a
+    # single mid-tone purple loses CVD separation from Weighted's blue almost
+    # entirely under protanopia simulation on a dark surface (ΔE ~2, well
+    # under the ≥8 target). Going deep/saturated in light mode and light/
+    # pastel in dark mode instead uses lightness - a channel CVD doesn't
+    # compromise - as the separating signal from blue, clearing the ≥15
+    # normal-vision floor and the ≥8 CVD target against both blue and green
+    # in both modes (the dataviz skill's own validator script wasn't runnable
+    # in this environment - no node - so this was checked with an equivalent
+    # manual OKLab + Brettel-matrix CVD simulation instead).
+    MODEL_BEST: {
+        "legend": "Best",
+        "light": "#68166b",
+        "dark": "#e0c5f5",
+        "dash": "solid",
+        "width": 2.5,
+        "opacity": 1.0,
+    },
 }
 
 BASELINE_STYLE = {
@@ -391,7 +432,7 @@ RAW_SOURCE_GRADIENT_DARK = ("#f2c14e", "#b23a4a")
 
 # Paint order (traces added in this order so the models the report is about
 # render on top of the de-emphasized context lines behind them).
-_Z_ORDER = {MODEL_ENSEMBLE: 3, MODEL_ML: 4, BASELINE_PERSISTENCE: 1, BASELINE_CLIMATOLOGY: 1}
+_Z_ORDER = {MODEL_ENSEMBLE: 3, MODEL_ML: 4, MODEL_BEST: 5, BASELINE_PERSISTENCE: 1, BASELINE_CLIMATOLOGY: 1}
 
 
 def _z_key(model: str) -> tuple[int, str]:
@@ -802,21 +843,21 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 }
 .recent-day-card[hidden] { display: none; }
 .recent-day-card h3 { font-size: 13.5px; font-weight: 600; margin: 0 0 8px; color: var(--text-secondary); }
-/* table-layout: fixed + a shared colgroup keeps the Metric/Weighted/ML/Actual
-   columns at identical widths across every day panel, regardless of how long
-   any one panel's values happen to be - without it each table sizes its
-   columns independently and they drift out of alignment panel to panel. */
+/* table-layout: fixed + a shared colgroup keeps the Metric/Weighted/ML/Best/
+   Actual columns at identical widths across every day panel, regardless of
+   how long any one panel's values happen to be - without it each table sizes
+   its columns independently and they drift out of alignment panel to panel. */
 .recent-day-card table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
-.recent-day-card col.col-metric { width: 40%; }
-.recent-day-card col.col-num { width: 20%; }
+.recent-day-card col.col-metric { width: 28%; }
+.recent-day-card col.col-num { width: 18%; }
 .recent-day-card th, .recent-day-card td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: right; }
 .recent-day-card th:first-child, .recent-day-card td:first-child { text-align: left; color: var(--text-secondary); }
 .recent-day-card td.num, .recent-day-card th.num { font-variant-numeric: tabular-nums; }
 @media (max-width: 480px) {
   .recent-day-card { padding: 12px 12px; }
   .recent-day-card table { font-size: 12px; }
-  .recent-day-card col.col-metric { width: 34%; }
-  .recent-day-card col.col-num { width: 22%; }
+  .recent-day-card col.col-metric { width: 24%; }
+  .recent-day-card col.col-num { width: 19%; }
   .recent-day-card th, .recent-day-card td { padding: 6px 5px; }
 }
 
@@ -1064,12 +1105,13 @@ def build_html_report(
     (default ~3 months). One card per target variable: a leaderboard (mean
     absolute error over the last `recent_days`) and a rolling `rolling_window`-
     day MAE-over-time line chart, plus a plain-HTML table twin of the
-    leaderboard. The ensemble and ML model are drawn in their own colors and
-    painted on top; every raw provider source gets its own shade along a fixed
-    orange->red gradient (de-emphasized via opacity/width) so they stay
-    distinguishable without competing with the two models this report is
-    actually about, and the two baselines are grey, dashed/dotted reference
-    lines rather than competing series.
+    leaderboard. The ensemble, ML, and adaptive "Best" models are drawn in
+    their own colors (blue/green/purple) and painted on top; every raw
+    provider source gets its own shade along a fixed orange->red gradient
+    (de-emphasized via opacity/width) so they stay distinguishable without
+    competing with the three models this report is actually about, and the
+    two baselines are grey, dashed/dotted reference lines rather than
+    competing series.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1226,7 +1268,7 @@ def build_html_report(
 <div class="wrap">
   <header class="top">
     <h1>{escape(title)}</h1>
-    <p>Ensemble and ML predictions scored against observed weather, alongside every individual forecast source and two naive baselines.</p>
+    <p>Ensemble and ML predictions scored against observed weather, alongside a per-location adaptive "Best" pick, every individual forecast source, and two naive baselines.</p>
     <div class="chip-row">
       <span class="chip" id="location-chip">{n_locations} location(s) pooled</span>
       <span class="chip">last {history_days}d &middot; {date_min} &rarr; {date_max}</span>

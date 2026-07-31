@@ -126,7 +126,7 @@ not a wider re-fetch.
 
 ---
 
-## The two predictions
+## The three predictions
 
 ### Weighted (the ensemble blend)
 
@@ -151,15 +151,42 @@ for a quantity that physically can't go below zero. `cloud_cover` and
 `humidity` are also capped at 100 (percentages can't physically exceed it) —
 a missing-source data gap once let Ridge extrapolate a 467.9% prediction.
 
+### Best (adaptive per-target pick)
+
+Not a model of its own — for each target variable, independently, `best.py`
+picks whichever candidate (a raw source, Weighted, or ML) has had the lowest
+mean absolute error **in that specific location** over the trailing 30 days
+(`--window`), then copies that candidate's own forecast for tomorrow. A
+candidate needs at least 14 scored days (`--best-min-days`) in that window to
+be eligible — a lucky handful of days shouldn't be enough to win. Different
+targets in the same location can (and routinely do) pick different winners —
+e.g. ECMWF for max temperature, Weighted for rain — and the winner can change
+day to day as each candidate's recent accuracy shifts. The two naive
+baselines are never eligible candidates: they exist to show how much better
+real forecasting is than doing nothing, not as strategies to adopt. Generated
+by `--predict-best`, stored in `best_predictions`, shown in **purple** as a
+third series everywhere Weighted/ML appear, and as a fourth "Best" column in
+Recent forecasts once a specific location is selected (it has no meaning
+pooled across 30 locations, same as Recent forecasts itself).
+
+Sub-daily rain (`precipitation_sum_{period}`) is the one exception to "each
+target picked independently": Best's 4 period values always come from
+whichever candidate won that day's **daily** precipitation_sum target, copied
+as-is, rather than each period separately picking its own winner - otherwise
+the 4 periods could each come from a different source and no longer sum to
+Best's own daily total. Stored in `best_predictions_periods`.
+
 ### Walk-forward backtest
 
-`--backtest-days N` regenerates both predictions for each of the past N days
-**as if that date were the present** — the weighted blend's MAE-weighting and
-the ML model's training data only ever use rows strictly before the target
-date, so nothing the model "shouldn't know yet" leaks in. A fresh model is
-trained from scratch for every single date (this is what makes it a genuine
-backtest rather than one model scored against its own future). Dates that
-already have a real prediction are left untouched — it only fills gaps.
+`--backtest-days N` regenerates the Weighted/ML predictions, and
+`--backtest-best-days N` the Best pick, for each of the past N days **as if
+that date were the present** — every one of these only ever uses rows
+strictly before the target date (Weighted's MAE-weighting, the ML model's
+training data, and Best's own candidate-selection window alike), so nothing
+the model "shouldn't know yet" leaks in. A fresh ML model is trained from
+scratch for every single date (this is what makes it a genuine backtest
+rather than one model scored against its own future). Dates that already
+have a real prediction are left untouched — it only fills gaps.
 
 ---
 
@@ -174,6 +201,7 @@ travels with the code):
 | `actuals` | source × location × observed date |
 | `ensemble_predictions` | location × forecast date × generation time (the weighted blend) |
 | `ml_predictions` | location × forecast date × generation time (the ML model) |
+| `best_predictions` | location × forecast date × generation time (the adaptive Best pick) |
 
 `--dedupe` removes duplicate rows for the same source/location/date, keeping
 **live over backfill** for `forecasts` (matching how every read query already
@@ -186,15 +214,15 @@ prioritizes them) and the **newest `generated_at`** everywhere else.
 `--accuracy-report PATH` builds a single self-contained interactive HTML file
 (Plotly, loaded from a CDN):
 
-- **Recent forecasts** — today's weighted/ML forecast plus the last several
-  days' predictions alongside their actuals, for whichever location is
-  selected in the dropdown (hidden until a location is picked — a single
+- **Recent forecasts** — today's weighted/ML/Best forecast plus the last
+  several days' predictions alongside their actuals, for whichever location
+  is selected in the dropdown (hidden until a location is picked — a single
   day's forecast isn't meaningful pooled across 30 locations).
 - **Historical accuracy** — one card per weather variable: a leaderboard
   (mean absolute error, ranked best to worst) and a rolling MAE-over-time
   line chart, both covering every individual source, the weighted blend, the
-  ML model, and two naive baselines (**persistence**: tomorrow = today;
-  **30-day trailing average**). A "Show baselines" toggle removes them and
+  ML model, the adaptive Best pick, and two naive baselines (**persistence**:
+  tomorrow = today; **30-day trailing average**). A "Show baselines" toggle removes them and
   rescales the chart to whatever's left. A location dropdown pools all 30
   locations by default or scopes everything to one.
 - Every individual source gets its own shade along a fixed gold→maroon
@@ -239,7 +267,7 @@ builds the ML feature table, trains models, and predicts tomorrow.
 This is what the scheduled GitHub Action actually runs:
 
 ```powershell
-weather-ensemble --all-locations --all --window 30 --train --train-window 90 --predict-ml
+weather-ensemble --all-locations --all --window 30 --train --train-window 90 --predict-ml --predict-best
 weather-ensemble --all-locations --accuracy-report reports/accuracy_report.html
 ```
 
@@ -261,6 +289,8 @@ every configured location instead of one `--lat/--lon/--name/--timezone`).
 | `--train` | Train the ML models (`--train-window` sets the training lookback, default 90) |
 | `--predict-ml` | Generate tomorrow's ML forecast |
 | `--backtest-days DAYS` | Walk-forward re-create both predictions for each of the past DAYS days |
+| `--predict-best` | Generate tomorrow's adaptive Best pick (`--best-min-days` sets the eligibility threshold, default 14) |
+| `--backtest-best-days DAYS` | Walk-forward re-create the Best pick for each of the past DAYS days |
 | `--dedupe` | Remove duplicate forecast/actual/prediction rows across the whole database |
 | `--accuracy-report PATH` | Build the interactive HTML dashboard |
 | `--report-window` / `--report-recent-days` / `--report-history-days` | Tune the dashboard's rolling-MAE smoothing window, leaderboard lookback, and total chart history (defaults 7 / 30 / 90 days) |
@@ -281,7 +311,8 @@ weather-ensemble-forecaster/
 │   ├── models.py        # ForecastRecord / ActualRecord dataclasses
 │   ├── service.py       # collection, backfill, MAE scoring, weighted blend
 │   ├── ml.py             # feature building, training, ML prediction
-│   ├── backtest.py      # walk-forward backtest of both predictions
+│   ├── best.py            # adaptive per-target "Best" candidate selection + live prediction
+│   ├── backtest.py      # walk-forward backtest of all three predictions
 │   ├── scoring.py        # long-format predictions-vs-actuals + rollups for the dashboard
 │   ├── report.py         # the interactive HTML dashboard
 │   ├── maintenance.py    # --dedupe

@@ -41,10 +41,12 @@ _MAIN_BLOB_SPECS = [
     ("actuals", "raw_json", ["id", "source", "location_name", "actual_date", "collected_at"]),
     ("ensemble_predictions", "metadata_json", ["id", "location_name", "forecast_date", "generated_at"]),
     ("ml_predictions", "metadata_json", ["id", "location_name", "forecast_date", "generated_at"]),
+    ("best_predictions", "metadata_json", ["id", "location_name", "forecast_date", "generated_at"]),
 ]
 _PERIOD_BLOB_SPECS = [
     ("ensemble_predictions_periods", "metadata_json", ["id", "location_name", "forecast_date", "period", "generated_at"]),
     ("ml_predictions_periods", "metadata_json", ["id", "location_name", "forecast_date", "period", "generated_at"]),
+    ("best_predictions_periods", "metadata_json", ["id", "location_name", "forecast_date", "period", "generated_at"]),
 ]
 
 

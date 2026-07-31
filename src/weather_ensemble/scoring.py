@@ -19,6 +19,7 @@ BASELINE_PERSISTENCE = "baseline_persistence"
 BASELINE_CLIMATOLOGY = "baseline_climatology"
 MODEL_ENSEMBLE = "ensemble"
 MODEL_ML = "ml"
+MODEL_BEST = "best"
 
 CONTINUOUS_TARGETS = [t for t in TARGETS if t != "did_rain"]
 
@@ -151,6 +152,47 @@ def _ml_predictions(db_path: Path, location: Location, window_days: int | None =
     return _long_rows_from_wide(wide, model_col="", date_col="forecast_date", source_prefix=MODEL_ML)
 
 
+def _best_predictions(db_path: Path, location: Location, window_days: int | None = None) -> list[dict]:
+    """The adaptive per-target 'Best' pick (see best.py) - mirrors _ml_predictions.
+
+    did_rain_probability is already a 0-1 fraction (best.py stores whichever
+    candidate won for that date's did_rain target in that form, regardless of
+    whether the winner was a raw source's rain_probability/100 or ML's own
+    did_rain_probability), so no further conversion is needed here.
+    """
+    cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
+    with db.connect(db_path) as conn:
+        wide = pd.read_sql_query(
+            """
+            WITH latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY location_name, forecast_date ORDER BY generated_at DESC
+                ) AS rn
+                FROM best_predictions
+                WHERE location_name = ? AND forecast_date >= ?
+            )
+            SELECT b.location_name, b.forecast_date, b.max_temp, b.min_temp,
+                   b.precipitation_sum, b.did_rain_probability, b.wind_speed, b.wind_gusts,
+                   b.cloud_cover, b.humidity, b.pressure_msl,
+                   a.max_temp AS actual_max_temp, a.min_temp AS actual_min_temp,
+                   a.precipitation_sum AS actual_precipitation_sum, a.did_rain AS actual_did_rain,
+                   a.wind_speed AS actual_wind_speed,
+                   a.wind_gusts AS actual_wind_gusts, a.cloud_cover AS actual_cloud_cover,
+                   a.humidity AS actual_humidity, a.pressure_msl AS actual_pressure_msl
+            FROM latest b
+            JOIN actuals a ON a.location_name = b.location_name AND a.actual_date = b.forecast_date
+            WHERE b.rn = 1
+            """,
+            conn,
+            params=(location.name, cutoff),
+        )
+    if wide.empty:
+        return []
+    if "did_rain_probability" in wide.columns:
+        wide = wide.assign(_rain_prob_fraction=wide["did_rain_probability"])
+    return _long_rows_from_wide(wide, model_col="", date_col="forecast_date", source_prefix=MODEL_BEST)
+
+
 def _baseline_predictions(
     db_path: Path,
     location: Location,
@@ -226,9 +268,9 @@ def _baseline_predictions(
 def build_predictions_long(db_path: Path, locations: list[Location], window_days: int | None = None) -> pd.DataFrame:
     """One row per (model, location, date, target) with a predicted/actual pair.
 
-    `model` ranges over every raw forecast source, plus 'ensemble', 'ml', and the
-    two baselines. This is the single table every rollup (rolling accuracy over
-    time, leaderboards) in this module is built from.
+    `model` ranges over every raw forecast source, plus 'ensemble', 'ml', 'best',
+    and the two baselines. This is the single table every rollup (rolling
+    accuracy over time, leaderboards) in this module is built from.
 
     `window_days` bounds every underlying query to recent history instead of
     scanning every row ever collected - a real incident: with no bound here,
@@ -243,6 +285,7 @@ def build_predictions_long(db_path: Path, locations: list[Location], window_days
         rows.extend(_source_predictions(db_path, location, window_days=window_days))
         rows.extend(_ensemble_predictions(db_path, location, window_days=window_days))
         rows.extend(_ml_predictions(db_path, location, window_days=window_days))
+        rows.extend(_best_predictions(db_path, location, window_days=window_days))
         rows.extend(_baseline_predictions(db_path, location, window_days=window_days))
 
     df = pd.DataFrame(rows)
@@ -368,6 +411,56 @@ def _ml_predictions_period(
     return rows
 
 
+def _best_predictions_period(
+    db_path: Path, location: Location, period: str, window_days: int | None = None
+) -> list[dict]:
+    """Small-slice sub-daily rain: mirrors _ml_predictions_period. best.py
+    never independently picks a period winner - each row here is whichever
+    candidate won that date's *daily* precipitation_sum target, so these
+    scores describe how that inherited choice performs at this period, not a
+    separately-optimized one.
+    """
+    cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
+    with db.connect_periods(get_periods_db_path(db_path)) as conn:
+        wide = pd.read_sql_query(
+            """
+            WITH latest AS (
+                SELECT *, ROW_NUMBER() OVER (
+                    PARTITION BY location_name, forecast_date, period ORDER BY generated_at DESC
+                ) AS rn
+                FROM best_predictions_periods
+                WHERE location_name = ? AND period = ? AND forecast_date >= ?
+            )
+            SELECT b.location_name, b.forecast_date, b.precipitation_sum,
+                   a.precipitation_sum AS actual_precipitation_sum
+            FROM latest b
+            JOIN actual_periods a
+              ON a.location_name = b.location_name AND a.actual_date = b.forecast_date AND a.period = ?
+            WHERE b.rn = 1
+            """,
+            conn,
+            params=(location.name, period, cutoff, period),
+        )
+    if wide.empty:
+        return []
+    target = f"precipitation_sum_{period}"
+    rows: list[dict] = []
+    for _, r in wide.iterrows():
+        if pd.isna(r["precipitation_sum"]) or pd.isna(r["actual_precipitation_sum"]):
+            continue
+        rows.append(
+            {
+                "model": MODEL_BEST,
+                "location_name": r["location_name"],
+                "forecast_date": r["forecast_date"],
+                "target": target,
+                "predicted": float(r["precipitation_sum"]),
+                "actual": float(r["actual_precipitation_sum"]),
+            }
+        )
+    return rows
+
+
 def _baseline_predictions_period(
     db_path: Path,
     location: Location,
@@ -435,6 +528,7 @@ def build_period_predictions_long(db_path: Path, locations: list[Location], wind
             rows.extend(_source_predictions_period(db_path, location, period, window_days=window_days))
             rows.extend(_ensemble_predictions_period(db_path, location, period, window_days=window_days))
             rows.extend(_ml_predictions_period(db_path, location, period, window_days=window_days))
+            rows.extend(_best_predictions_period(db_path, location, period, window_days=window_days))
             rows.extend(_baseline_predictions_period(db_path, location, period, window_days=window_days))
 
     df = pd.DataFrame(rows)
