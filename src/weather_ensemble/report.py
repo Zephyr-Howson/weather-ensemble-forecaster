@@ -283,11 +283,13 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
         day_cards.append(
             f"""<div class="recent-day-card" data-day-panel="{day_idx}"{hidden_attr}>
   <h3 data-day-label="{day_idx}">{escape(day["date"])}</h3>
-  <table>
-    <colgroup><col class="col-metric"><col class="col-num"><col class="col-num"><col class="col-num"><col class="col-num"></colgroup>
-    <thead><tr><th>Metric</th><th class="num">Weighted</th><th class="num">ML</th><th class="num">Best</th><th class="num">Actual</th></tr></thead>
-    <tbody>{rows}</tbody>
-  </table>
+  <div class="recent-day-table-scroll">
+    <table>
+      <colgroup><col class="col-metric"><col class="col-num"><col class="col-num"><col class="col-num"><col class="col-num"></colgroup>
+      <thead><tr><th>Metric</th><th class="num">Weighted</th><th class="num">ML</th><th class="num">Best</th><th class="num">Actual</th></tr></thead>
+      <tbody>{rows}</tbody>
+    </table>
+  </div>
 </div>"""
         )
 
@@ -321,6 +323,13 @@ function updateRecentForecast(loc) {{
     return;
   }}
   section.style.display = "";
+  // The section (and every day panel inside it) starts hidden, so its
+  // scrollable table has zero measurable width until now - re-check the
+  // fade right as it actually becomes visible, not just on load/resize.
+  var visiblePanel = document.querySelector('#recent-days [data-day-panel]:not([hidden])');
+  if (visiblePanel && typeof updateScrollFade === "function") {{
+    updateScrollFade(visiblePanel.querySelector(".recent-day-table-scroll"));
+  }}
   days.forEach(function (day, i) {{
     var label = document.querySelector('[data-day-label="' + i + '"]');
     if (label) label.textContent = day.date;
@@ -345,6 +354,10 @@ document.addEventListener("DOMContentLoaded", function () {{
     document.querySelectorAll('#recent-days [data-day-panel]').forEach(function (panel) {{
       panel.hidden = panel.dataset.dayPanel !== idx;
     }});
+    var newlyVisible = document.querySelector('#recent-days [data-day-panel="' + idx + '"]');
+    if (newlyVisible && typeof updateScrollFade === "function") {{
+      updateScrollFade(newlyVisible.querySelector(".recent-day-table-scroll"));
+    }}
   }});
 }});
 </script>
@@ -675,11 +688,11 @@ def _data_quality_html(data_quality_js: dict, window_days: int) -> str:
   <div class="dq-summary">
     <div class="dq-stat">
       <span class="dq-stat-value" id="dq-missing-pct">{pooled["missing_pct"]:.2f}%</span>
-      <span class="dq-stat-label">of expected forecast rows are missing entirely</span>
+      <span class="dq-stat-label">of expected forecasts are missing entirely</span>
     </div>
     <div class="dq-stat">
       <span class="dq-stat-value" id="dq-null-pct">{pooled["null_pct"]:.2f}%</span>
-      <span class="dq-stat-label">of fields in existing rows are unexpectedly null (excludes fields a source/model never reports at all)</span>
+      <span class="dq-stat-label">of expected fields in existing forecasts are missing</span>
     </div>
   </div>
   <details class="table-view dq-breakdown">
@@ -928,22 +941,33 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 }
 .recent-day-card[hidden] { display: none; }
 .recent-day-card h3 { font-size: 13.5px; font-weight: 600; margin: 0 0 8px; color: var(--text-secondary); }
+/* On a narrow phone, 5 columns squeezed to fit the screen read as cramped
+   no matter how small the font gets - min-width keeps every column at a
+   comfortable size and lets the table scroll horizontally instead (the same
+   overflow-x + fade-when-truncated pattern as .jump-nav/.day-tabs), rather
+   than shrinking cell padding and text until values collide. */
+.recent-day-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: thin;
+}
+.recent-day-table-scroll.has-overflow {
+  mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 28px), transparent 100%);
+}
 /* table-layout: fixed + a shared colgroup keeps the Metric/Weighted/ML/Best/
    Actual columns at identical widths across every day panel, regardless of
    how long any one panel's values happen to be - without it each table sizes
    its columns independently and they drift out of alignment panel to panel. */
-.recent-day-card table { width: 100%; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
+.recent-day-card table { width: 100%; min-width: 520px; border-collapse: collapse; font-size: 13px; table-layout: fixed; }
 .recent-day-card col.col-metric { width: 28%; }
 .recent-day-card col.col-num { width: 18%; }
-.recent-day-card th, .recent-day-card td { padding: 6px 10px; border-bottom: 1px solid var(--border); text-align: right; }
+.recent-day-card th, .recent-day-card td { padding: 8px 12px; border-bottom: 1px solid var(--border); text-align: right; }
 .recent-day-card th:first-child, .recent-day-card td:first-child { text-align: left; color: var(--text-secondary); }
 .recent-day-card td.num, .recent-day-card th.num { font-variant-numeric: tabular-nums; }
 @media (max-width: 480px) {
   .recent-day-card { padding: 12px 12px; }
-  .recent-day-card table { font-size: 12px; }
-  .recent-day-card col.col-metric { width: 24%; }
-  .recent-day-card col.col-num { width: 19%; }
-  .recent-day-card th, .recent-day-card td { padding: 6px 5px; }
+  .recent-day-card table { font-size: 12.5px; }
 }
 
 .historical-accuracy-heading { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
@@ -1081,6 +1105,8 @@ function updateScrollFade(el) {
 function updateAllScrollFades() {
   updateScrollFade(document.querySelector(".jump-nav"));
   updateScrollFade(document.getElementById("day-tabs"));
+  var visiblePanel = document.querySelector('#recent-days [data-day-panel]:not([hidden])');
+  if (visiblePanel) updateScrollFade(visiblePanel.querySelector(".recent-day-table-scroll"));
 }
 document.addEventListener("DOMContentLoaded", function () {
   updateToolbarHeight();
@@ -1375,7 +1401,6 @@ def build_html_report(
 <div class="wrap">
   <header class="top">
     <h1>{escape(title)}</h1>
-    <p>Ensemble and ML predictions scored against observed weather, alongside a per-location adaptive "Best" pick, every individual forecast source, and two naive baselines.</p>
     <div class="chip-row">
       <span class="chip" id="location-chip">{n_locations} location(s) pooled</span>
       <span class="chip">last {history_days}d &middot; {date_min} &rarr; {date_max}</span>
@@ -1406,8 +1431,8 @@ def build_html_report(
   </div>
   <div class="legend-key" id="legend-key">{legend_key_hero}{legend_key_raw}<span id="legend-baselines" style="display:none">{legend_key_baselines}</span></div>
   {''.join(cards)}
-  {data_quality_html}
   <footer>Lower is better for every metric shown. Rain is scored as % chance of rain against the binary rain/no-rain outcome (mean absolute error between the forecast probability and the 0/1 actual); every other metric is mean absolute error in its native unit.</footer>
+  {data_quality_html}
 </div>
 {_theme_script(theme_traces)}
 {_controls_script(location_data)}
