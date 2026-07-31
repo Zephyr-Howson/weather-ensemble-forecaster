@@ -9,7 +9,11 @@ from pathlib import Path
 import pandas as pd
 
 from weather_ensemble.archive import archive_old_forecasts, export_blob_backlog
-from weather_ensemble.backtest import backtest_best_predictions, backtest_period_predictions, backtest_predictions
+from weather_ensemble.backtest import (
+    backtest_best_predictions,
+    backtest_period_predictions,
+    backtest_predictions,
+)
 from weather_ensemble.best import DEFAULT_MIN_DAYS, predict_best
 from weather_ensemble.config import (
     AUSTRALIAN_LOCATIONS,

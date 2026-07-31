@@ -7,7 +7,13 @@ import pandas as pd
 from weather_ensemble.backtest import backtest_best_predictions
 from weather_ensemble.best import predict_best, select_best_model
 from weather_ensemble.config import PERIODS, Location, get_periods_db_path
-from weather_ensemble.db import connect, connect_periods, insert_forecast_periods, insert_forecasts, upsert_actual
+from weather_ensemble.db import (
+    connect,
+    connect_periods,
+    insert_forecast_periods,
+    insert_forecasts,
+    upsert_actual,
+)
 from weather_ensemble.models import ActualRecord, ForecastPeriodRecord, ForecastRecord
 
 LOCATION = Location(name="Melbourne", lat=-37.8136, lon=144.9631, timezone="Australia/Melbourne")
