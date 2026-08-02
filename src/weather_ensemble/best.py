@@ -8,7 +8,14 @@ from typing import Any
 import pandas as pd
 
 from weather_ensemble import db
-from weather_ensemble.config import PERIODS, TARGETS, Location, get_periods_db_path, local_today
+from weather_ensemble.config import (
+    OPEN_METEO_MODELS,
+    PERIODS,
+    TARGETS,
+    Location,
+    get_periods_db_path,
+    local_today,
+)
 from weather_ensemble.scoring import (
     BASELINE_CLIMATOLOGY,
     BASELINE_PERSISTENCE,
@@ -40,13 +47,26 @@ _EXCLUDED_CANDIDATES = {BASELINE_PERSISTENCE, BASELINE_CLIMATOLOGY, MODEL_BEST}
 DEFAULT_WINDOW_DAYS = 30
 DEFAULT_MIN_DAYS = 14
 
-# The daily TARGETS set - each selected independently. Sub-daily rain
-# periods (precipitation_sum_{period}) are NOT an independent selection here:
+# The daily TARGETS set. Every target except precipitation_sum/did_rain is
+# selected independently (see _predictions_for_date). Sub-daily rain periods
+# (precipitation_sum_{period}) are NOT an independent selection here:
 # whichever candidate wins the daily precipitation_sum target has its own
 # period breakdown copied too (see _period_values_for_model), so the four
 # periods always sum to Best's own daily total instead of each period
 # potentially picking a different winner and disagreeing with it.
 BEST_TARGETS: list[str] = list(TARGETS)
+
+# Only candidates that actually report sub-daily rain periods: the 4 raw
+# Open-Meteo model variants (see collect_forecast_periods in service.py - no
+# other raw provider ever collects period-level precipitation at all), plus
+# the two blended models, which are themselves built from a mix of raw
+# sources that always includes those 4. precipitation_sum and did_rain are
+# both selected from this restricted pool (see _select_precip_and_rain), so
+# whichever one wins is guaranteed to have real period data to copy - Best
+# never goes blank for a target date just because the winner happened to be a
+# source that never reports periods at all (BOM, WeatherAPI, OpenWeatherMap,
+# Weatherbit, AccuWeather, Visual Crossing, wttr.in, SILO).
+PERIOD_AWARE_CANDIDATES = {MODEL_ENSEMBLE, MODEL_ML} | {f"open_meteo_{m}" for m in OPEN_METEO_MODELS}
 
 
 def candidate_pool(long_df: pd.DataFrame) -> pd.DataFrame:
@@ -253,6 +273,48 @@ def _insert_best_period_predictions(
         )
 
 
+def _select_precip_and_rain(
+    pool: pd.DataFrame,
+    target_date: date,
+    window_days: int,
+    min_days: int,
+    value_for: Callable[[str, str], float | None],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """precipitation_sum and did_rain are chosen together, from whichever
+    PERIOD_AWARE_CANDIDATES model has the lowest trailing MAE on
+    precipitation_sum specifically - unlike every other BEST_TARGETS entry,
+    did_rain is NOT ranked independently. This guarantees the winner always
+    has real period data to copy (_period_values_for_model, called
+    separately in predict_best/_backtest_best, copies whichever model wins
+    here), and that Best's rain probability, precipitation total, and every
+    period figure all come from the exact same source instead of three
+    independently-selected winners that could disagree with each other.
+    """
+    predictions: dict[str, Any] = {}
+    chosen: dict[str, str] = {}
+
+    restricted = pool if pool.empty else pool[pool["model"].isin(PERIOD_AWARE_CANDIDATES)]
+    precip_value = None
+    precip_model = None
+    for candidate in rank_eligible_models(restricted, "precipitation_sum", target_date, window_days, min_days):
+        precip_value = value_for(candidate, "precipitation_sum")
+        if precip_value is not None:
+            precip_model = candidate
+            break
+    if precip_model is None:
+        return predictions, chosen
+
+    predictions["precipitation_sum"] = round(float(precip_value), 2)
+    chosen["precipitation_sum"] = precip_model
+
+    rain_value = value_for(precip_model, "did_rain")
+    if rain_value is not None:
+        predictions["did_rain_probability"] = round(float(rain_value), 3)
+        chosen["did_rain"] = precip_model
+
+    return predictions, chosen
+
+
 def _predictions_for_date(
     pool: pd.DataFrame,
     target_date: date,
@@ -260,18 +322,20 @@ def _predictions_for_date(
     min_days: int,
     value_for: Callable[[str, str], float | None],
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    """Shared per-target selection loop: for every BEST_TARGETS entry, walk
-    rank_eligible_models's order (best MAE first) and use the first candidate
-    whose value actually resolves via `value_for(model, target)` - not just
-    the single top-ranked one, since even a consistently-accurate candidate
-    can have a one-off gap on this exact date (see rank_eligible_models). The
-    live and backcast paths differ only in how that lookup is done (a DB
-    query for "tomorrow", vs. reading the already-scored `pool` for a past
-    date).
+    """Shared per-target selection loop: for every BEST_TARGETS entry except
+    precipitation_sum/did_rain (handled together first, see
+    _select_precip_and_rain), walk rank_eligible_models's order (best MAE
+    first) and use the first candidate whose value actually resolves via
+    `value_for(model, target)` - not just the single top-ranked one, since
+    even a consistently-accurate candidate can have a one-off gap on this
+    exact date (see rank_eligible_models). The live and backcast paths differ
+    only in how that lookup is done (a DB query for "tomorrow", vs. reading
+    the already-scored `pool` for a past date).
     """
-    predictions: dict[str, Any] = {}
-    chosen: dict[str, str] = {}
+    predictions, chosen = _select_precip_and_rain(pool, target_date, window_days, min_days, value_for)
     for target in BEST_TARGETS:
+        if target in ("precipitation_sum", "did_rain"):
+            continue
         value = None
         model = None
         for candidate in rank_eligible_models(pool, target, target_date, window_days, min_days):
@@ -281,9 +345,7 @@ def _predictions_for_date(
                 break
         if model is None:
             continue
-        key = "did_rain_probability" if target == "did_rain" else target
-        decimals = 3 if target == "did_rain" else 2
-        predictions[key] = round(float(value), decimals)
+        predictions[target] = round(float(value), 2)
         chosen[target] = model
     return predictions, chosen
 

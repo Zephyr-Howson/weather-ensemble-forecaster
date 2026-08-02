@@ -191,6 +191,141 @@ def test_predict_best_falls_through_when_top_candidate_has_no_value_for_the_date
     assert result["predictions"]["max_temp"] == 21.0
 
 
+def _forecast_precip_and_rain(
+    source: str, forecast_date: date, precip: float, rain_probability: float
+) -> ForecastRecord:
+    return ForecastRecord(
+        source=source,
+        location_name=LOCATION.name,
+        lat=LOCATION.lat,
+        lon=LOCATION.lon,
+        forecast_date=forecast_date,
+        collected_at=datetime.combine(forecast_date - timedelta(days=1), datetime.min.time()),
+        max_temp=20.0,
+        min_temp=15.0,
+        rain_probability=rain_probability,
+        precipitation_sum=precip,
+        wind_speed=15.0,
+        wind_gusts=25.0,
+        cloud_cover=40.0,
+        humidity=60.0,
+        pressure_msl=1015.0,
+        raw_json={},
+    )
+
+
+def test_predict_best_precipitation_excludes_non_period_aware_candidates(tmp_path):
+    """A non-period-aware source (BOM here - see PERIOD_AWARE_CANDIDATES in
+    best.py) must never win Best's precipitation_sum selection even with a
+    far better MAE than every period-aware candidate, since Best's period
+    breakdown can only ever be copied from a period-aware winner (see
+    _period_values_for_model - no other provider ever collects sub-daily rain
+    data at all). The same source is still free to win an unrelated target
+    (max_temp here) on its own merits - the restriction only scopes
+    precipitation_sum/did_rain, not the source everywhere.
+    """
+    db_path = tmp_path / "weather.db"
+    start = date(2026, 6, 1)
+    history_days = [start + timedelta(days=i) for i in range(20)]
+    tomorrow = history_days[-1] + timedelta(days=1)
+
+    def forecast(source: str, forecast_date: date, max_temp: float, precip: float) -> ForecastRecord:
+        return ForecastRecord(
+            source=source,
+            location_name=LOCATION.name,
+            lat=LOCATION.lat,
+            lon=LOCATION.lon,
+            forecast_date=forecast_date,
+            collected_at=datetime.combine(forecast_date - timedelta(days=1), datetime.min.time()),
+            max_temp=max_temp,
+            min_temp=max_temp - 5,
+            precipitation_sum=precip,
+            wind_speed=15.0,
+            wind_gusts=25.0,
+            cloud_cover=40.0,
+            humidity=60.0,
+            pressure_msl=1015.0,
+            raw_json={},
+        )
+
+    non_period_source = "bom"
+
+    with connect(db_path) as conn:
+        for day in history_days:
+            insert_forecasts(
+                conn,
+                [
+                    # bom: near-perfect precipitation, but a poor max_temp forecast.
+                    forecast(non_period_source, day, 20.1, 2.01),
+                    # the only period-aware candidate: worse precipitation MAE,
+                    # but a near-perfect max_temp forecast.
+                    forecast(SOURCE_NOISY, day, 30.0, 4.0),
+                ],
+            )
+            upsert_actual(conn, _actual_with_precip(day, 2.0))  # actual max_temp=20.0, precip=2.0
+        insert_forecasts(
+            conn,
+            [
+                forecast(non_period_source, tomorrow, 21.0, 5.0),
+                forecast(SOURCE_NOISY, tomorrow, 31.0, 6.0),
+            ],
+        )
+
+    result = predict_best(db_path, LOCATION, window_days=30, min_days=14, target_date=tomorrow)
+
+    # bom has the far better precipitation MAE (~0.01 vs ~2.0) but is excluded
+    # from precipitation_sum/did_rain selection entirely.
+    assert result["chosen_sources"]["precipitation_sum"] == SOURCE_NOISY
+    assert result["predictions"]["precipitation_sum"] == 6.0
+    # ...yet bom still wins max_temp on its own merits - the restriction is
+    # scoped to precipitation_sum/did_rain only.
+    assert result["chosen_sources"]["max_temp"] == non_period_source
+    assert result["predictions"]["max_temp"] == 21.0
+
+
+def test_predict_best_did_rain_copied_from_precipitation_winner(tmp_path):
+    """did_rain must come from whichever period-aware candidate wins
+    precipitation_sum, never from an independent per-target did_rain
+    ranking - even when a different candidate has a far better did_rain MAE
+    of its own. Picking rain%, precipitation mm, and every period from the
+    same source is the whole point of linking the two selections together.
+    """
+    db_path = tmp_path / "weather.db"
+    start = date(2026, 6, 1)
+    history_days = [start + timedelta(days=i) for i in range(20)]
+    tomorrow = history_days[-1] + timedelta(days=1)
+
+    precip_winner = "open_meteo_ecmwf_ifs025"  # best precipitation MAE, poor rain% MAE
+    rain_winner = "open_meteo_gem_seamless"  # worse precipitation MAE, best rain% MAE
+
+    with connect(db_path) as conn:
+        for day in history_days:
+            insert_forecasts(
+                conn,
+                [
+                    _forecast_precip_and_rain(precip_winner, day, 2.01, 10.0),  # precip abs_error ~0.01
+                    _forecast_precip_and_rain(rain_winner, day, 4.0, 95.0),  # rain% abs_error 0.05 vs actual 1.0
+                ],
+            )
+            upsert_actual(conn, _actual_with_precip(day, 2.0))  # did_rain actual = 1 (precip >= 0.2)
+        insert_forecasts(
+            conn,
+            [
+                _forecast_precip_and_rain(precip_winner, tomorrow, 5.0, 15.0),
+                _forecast_precip_and_rain(rain_winner, tomorrow, 6.0, 90.0),
+            ],
+        )
+
+    result = predict_best(db_path, LOCATION, window_days=30, min_days=14, target_date=tomorrow)
+
+    assert result["chosen_sources"]["precipitation_sum"] == precip_winner
+    assert result["predictions"]["precipitation_sum"] == 5.0
+    # did_rain must be copied from precip_winner (0.15), not rain_winner
+    # (0.90), even though rain_winner has the better standalone did_rain MAE.
+    assert result["chosen_sources"]["did_rain"] == precip_winner
+    assert result["predictions"]["did_rain_probability"] == 0.15
+
+
 def test_backtest_best_predictions_walk_forward(tmp_path):
     """Mirrors test_backtest_predictions_writes_ensemble_and_ml_rows: seed
     history plus one more day with only forecasts (no actual, no existing

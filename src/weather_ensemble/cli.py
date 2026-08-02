@@ -356,24 +356,6 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
             _print_json(result)
         ok &= _guarded(location, "backtest", _backtest)
 
-    if args.predict_best:
-        # Runs after --forecast/--predict-ml above, since it only ever
-        # copies an already-computed candidate's value for tomorrow - it
-        # needs this run's own fresh Weighted/ML predictions to already
-        # exist if either of those turns out to be today's winning candidate.
-        def _predict_best():
-            result = predict_best(args.db, location, window_days=args.best_window_days, min_days=args.best_min_days)
-            _print_json(result)
-        ok &= _guarded(location, "predict_best", _predict_best)
-
-    if args.backtest_best_days:
-        def _backtest_best():
-            result = backtest_best_predictions(
-                args.db, location, days=args.backtest_best_days, window_days=args.best_window_days, min_days=args.best_min_days
-            )
-            _print_json(result)
-        ok &= _guarded(location, "backtest_best", _backtest_best)
-
     if args.collect_periods:
         def _collect_periods():
             n = collect_forecast_periods(args.db, location)
@@ -418,6 +400,31 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         if forecast_dates:
             recon = reconcile_period_predictions(args.db, location, "ml", sorted(forecast_dates))
             print(f"Reconciled ML periods to daily total: {recon}")
+
+    if args.predict_best:
+        # Runs after --forecast/--predict-ml/--collect-periods/
+        # --forecast-periods/--predict-ml-periods above, since it only ever
+        # copies an already-computed candidate's value for tomorrow - it
+        # needs this run's own fresh Weighted/ML daily predictions to already
+        # exist if either turns out to be today's winning candidate, AND (now
+        # that precipitation_sum/did_rain selection is restricted to
+        # PERIOD_AWARE_CANDIDATES, see best.py) it needs this run's own fresh
+        # period rows for ensemble/ml already collected and reconciled to
+        # their daily total - otherwise a period-aware candidate could win
+        # here before its own periods for today even exist yet, leaving
+        # Best's period breakdown blank despite picking an eligible winner.
+        def _predict_best():
+            result = predict_best(args.db, location, window_days=args.best_window_days, min_days=args.best_min_days)
+            _print_json(result)
+        ok &= _guarded(location, "predict_best", _predict_best)
+
+    if args.backtest_best_days:
+        def _backtest_best():
+            result = backtest_best_predictions(
+                args.db, location, days=args.backtest_best_days, window_days=args.best_window_days, min_days=args.best_min_days
+            )
+            _print_json(result)
+        ok &= _guarded(location, "backtest_best", _backtest_best)
 
     if args.backtest_periods_days:
         date_ranges = []
