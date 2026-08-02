@@ -279,30 +279,58 @@ def _select_precip_and_rain(
     window_days: int,
     min_days: int,
     value_for: Callable[[str, str], float | None],
-) -> tuple[dict[str, Any], dict[str, str]]:
+    periods_for: Callable[[str], dict[str, float | None]],
+) -> tuple[dict[str, Any], dict[str, str], dict[str, float | None]]:
     """precipitation_sum and did_rain are chosen together, from whichever
     PERIOD_AWARE_CANDIDATES model has the lowest trailing MAE on
     precipitation_sum specifically - unlike every other BEST_TARGETS entry,
-    did_rain is NOT ranked independently. This guarantees the winner always
-    has real period data to copy (_period_values_for_model, called
-    separately in predict_best/_backtest_best, copies whichever model wins
-    here), and that Best's rain probability, precipitation total, and every
-    period figure all come from the exact same source instead of three
-    independently-selected winners that could disagree with each other.
+    did_rain is NOT ranked independently. This guarantees the winner is
+    always a source that reports real period data in general, and that
+    Best's rain probability, precipitation total, and every period figure all
+    come from the exact same source instead of three independently-selected
+    winners that could disagree with each other.
+
+    Among the ranked candidates, the first one that ALSO actually has period
+    data for this exact target_date wins outright - not just the first one
+    with a resolvable precipitation_sum value. A period-aware source can
+    still have a one-off gap in its own period collection on one specific
+    date (e.g. a brand-new live-only source whose period tracking came
+    online a day after its daily forecasts did - confirmed in practice), and
+    without this check that source could still win the daily figure while
+    leaving every period blank, exactly the kind of gap this whole selection
+    scheme exists to avoid. Only if NO ranked candidate has any period data
+    at all for this date does the search fall back to the best candidate
+    with just a value (the same graceful-degradation rule every other target
+    already gets, see rank_eligible_models) - Best still reports its best
+    available precipitation/rain figure rather than losing the day entirely,
+    with periods left blank as a genuine last resort.
     """
     predictions: dict[str, Any] = {}
     chosen: dict[str, str] = {}
+    period_values: dict[str, float | None] = {}
 
     restricted = pool if pool.empty else pool[pool["model"].isin(PERIOD_AWARE_CANDIDATES)]
-    precip_value = None
     precip_model = None
+    precip_value = None
+    fallback_model = None
+    fallback_value = None
+    fallback_periods: dict[str, float | None] = {}
+
     for candidate in rank_eligible_models(restricted, "precipitation_sum", target_date, window_days, min_days):
-        precip_value = value_for(candidate, "precipitation_sum")
-        if precip_value is not None:
-            precip_model = candidate
+        value = value_for(candidate, "precipitation_sum")
+        if value is None:
+            continue
+        candidate_periods = periods_for(candidate)
+        if fallback_model is None:
+            fallback_model, fallback_value, fallback_periods = candidate, value, candidate_periods
+        if any(v is not None for v in candidate_periods.values()):
+            precip_model, precip_value, period_values = candidate, value, candidate_periods
             break
+
     if precip_model is None:
-        return predictions, chosen
+        if fallback_model is None:
+            return predictions, chosen, period_values
+        precip_model, precip_value, period_values = fallback_model, fallback_value, fallback_periods
 
     predictions["precipitation_sum"] = round(float(precip_value), 2)
     chosen["precipitation_sum"] = precip_model
@@ -312,7 +340,7 @@ def _select_precip_and_rain(
         predictions["did_rain_probability"] = round(float(rain_value), 3)
         chosen["did_rain"] = precip_model
 
-    return predictions, chosen
+    return predictions, chosen, period_values
 
 
 def _predictions_for_date(
@@ -321,7 +349,8 @@ def _predictions_for_date(
     window_days: int,
     min_days: int,
     value_for: Callable[[str, str], float | None],
-) -> tuple[dict[str, Any], dict[str, str]]:
+    periods_for: Callable[[str], dict[str, float | None]],
+) -> tuple[dict[str, Any], dict[str, str], dict[str, float | None]]:
     """Shared per-target selection loop: for every BEST_TARGETS entry except
     precipitation_sum/did_rain (handled together first, see
     _select_precip_and_rain), walk rank_eligible_models's order (best MAE
@@ -332,7 +361,9 @@ def _predictions_for_date(
     only in how that lookup is done (a DB query for "tomorrow", vs. reading
     the already-scored `pool` for a past date).
     """
-    predictions, chosen = _select_precip_and_rain(pool, target_date, window_days, min_days, value_for)
+    predictions, chosen, period_values = _select_precip_and_rain(
+        pool, target_date, window_days, min_days, value_for, periods_for
+    )
     for target in BEST_TARGETS:
         if target in ("precipitation_sum", "did_rain"):
             continue
@@ -347,7 +378,7 @@ def _predictions_for_date(
             continue
         predictions[target] = round(float(value), 2)
         chosen[target] = model
-    return predictions, chosen
+    return predictions, chosen, period_values
 
 
 def predict_best(
@@ -386,22 +417,26 @@ def predict_best(
     def value_for(model: str, target: str) -> float | None:
         return _candidate_value_live(db_path, location, model, target, target_date)
 
-    predictions, chosen = _predictions_for_date(pool, target_date, window_days, min_days, value_for)
-    if not predictions:
-        return {"error": "No eligible candidate found for any target.", "forecast_date": target_date.isoformat()}
+    with db.connect_periods(get_periods_db_path(db_path)) as periods_conn:
 
-    generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
-    with db.connect(db_path) as conn:
-        _insert_best_prediction(conn, location, target_date.isoformat(), generated_at, window_days, min_days, predictions)
-        conn.commit()
+        def periods_for(model: str) -> dict[str, float | None]:
+            return _period_values_for_model(periods_conn, location, model, target_date)
 
-    if "precipitation_sum" in chosen:
-        with db.connect_periods(get_periods_db_path(db_path)) as periods_conn:
-            period_values = _period_values_for_model(periods_conn, location, chosen["precipitation_sum"], target_date)
-            if any(v is not None for v in period_values.values()):
-                _insert_best_period_predictions(
-                    periods_conn, location, target_date.isoformat(), generated_at, window_days, min_days, period_values
-                )
-                periods_conn.commit()
+        predictions, chosen, period_values = _predictions_for_date(
+            pool, target_date, window_days, min_days, value_for, periods_for
+        )
+        if not predictions:
+            return {"error": "No eligible candidate found for any target.", "forecast_date": target_date.isoformat()}
+
+        generated_at = datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds")
+        with db.connect(db_path) as conn:
+            _insert_best_prediction(conn, location, target_date.isoformat(), generated_at, window_days, min_days, predictions)
+            conn.commit()
+
+        if "precipitation_sum" in chosen and any(v is not None for v in period_values.values()):
+            _insert_best_period_predictions(
+                periods_conn, location, target_date.isoformat(), generated_at, window_days, min_days, period_values
+            )
+            periods_conn.commit()
 
     return {"forecast_date": target_date.isoformat(), "predictions": predictions, "chosen_sources": chosen}

@@ -467,3 +467,104 @@ def test_predict_best_period_precipitation_inherits_daily_winner(tmp_path):
 
     assert stored == accurate_periods  # the accurate source's own periods, not the noisy one's
     assert sum(stored.values()) == result["predictions"]["precipitation_sum"]  # periods sum to Best's daily total
+
+
+def test_predict_best_precipitation_falls_through_when_winner_lacks_periods_for_this_date(tmp_path):
+    """A period-aware candidate can still have a one-off gap in its own
+    period collection for this exact date - e.g. a brand-new live-only
+    source whose period tracking came online a day after its daily forecasts
+    did (confirmed in practice for open_meteo_best_match). Best must skip it
+    in favor of the next-ranked period-aware candidate that actually has
+    period data for this date, even though the skipped candidate has the
+    better standalone precipitation MAE - a complete winner beats a more
+    "accurate" one that would leave every period blank.
+    """
+    db_path = tmp_path / "weather.db"
+    start = date(2026, 6, 1)
+    history_days = [start + timedelta(days=i) for i in range(20)]
+    tomorrow = history_days[-1] + timedelta(days=1)
+
+    no_periods_today = "open_meteo_best_match"  # best precip MAE, but no periods seeded for tomorrow
+    has_periods_today = "open_meteo_ecmwf_ifs025"  # worse precip MAE, but has periods seeded for tomorrow
+
+    with connect(db_path) as conn:
+        for day in history_days:
+            insert_forecasts(
+                conn,
+                [
+                    _forecast_with_precip(no_periods_today, day, 2.01),  # abs_error ~0.01
+                    _forecast_with_precip(has_periods_today, day, 4.0),  # abs_error 2.0
+                ],
+            )
+            upsert_actual(conn, _actual_with_precip(day, 2.0))
+        insert_forecasts(
+            conn,
+            [
+                _forecast_with_precip(no_periods_today, tomorrow, 5.0),
+                _forecast_with_precip(has_periods_today, tomorrow, 6.0),
+            ],
+        )
+
+    # Only has_periods_today gets period rows seeded for tomorrow - simulates
+    # no_periods_today's period collection not having started yet for this date.
+    complete_periods = dict(zip(PERIODS, [0.5, 1.0, 1.0, 0.5], strict=True))
+    with connect_periods(get_periods_db_path(db_path)) as pconn:
+        for period, value in complete_periods.items():
+            insert_forecast_periods(pconn, [_forecast_period(has_periods_today, tomorrow, period, value)])
+
+    result = predict_best(db_path, LOCATION, window_days=30, min_days=14, target_date=tomorrow)
+
+    assert result["chosen_sources"]["precipitation_sum"] == has_periods_today
+    assert result["predictions"]["precipitation_sum"] == 6.0
+
+    with connect_periods(get_periods_db_path(db_path)) as pconn:
+        rows = pconn.execute(
+            "SELECT period, precipitation_sum FROM best_predictions_periods WHERE location_name = ? AND forecast_date = ?",
+            (LOCATION.name, tomorrow.isoformat()),
+        ).fetchall()
+    stored = {r["period"]: r["precipitation_sum"] for r in rows}
+    assert stored == complete_periods
+
+
+def test_predict_best_precipitation_falls_back_to_value_only_when_no_candidate_has_periods(tmp_path):
+    """If literally no period-aware candidate has period data for this exact
+    date, Best must still report its best available precipitation_sum/
+    did_rain figure rather than losing the day's prediction entirely - the
+    same graceful-degradation guarantee every other target already gets.
+    Periods are left blank in this genuine last-resort case.
+    """
+    db_path = tmp_path / "weather.db"
+    start = date(2026, 6, 1)
+    history_days = [start + timedelta(days=i) for i in range(20)]
+    tomorrow = history_days[-1] + timedelta(days=1)
+
+    with connect(db_path) as conn:
+        for day in history_days:
+            insert_forecasts(
+                conn,
+                [
+                    _forecast_with_precip(SOURCE_ACCURATE, day, 2.1),  # abs_error 0.1 vs actual 2.0
+                    _forecast_with_precip(SOURCE_NOISY, day, 8.0),  # abs_error 6.0
+                ],
+            )
+            upsert_actual(conn, _actual_with_precip(day, 2.0))
+        insert_forecasts(
+            conn,
+            [
+                _forecast_with_precip(SOURCE_ACCURATE, tomorrow, 3.0),
+                _forecast_with_precip(SOURCE_NOISY, tomorrow, 9.0),
+            ],
+        )
+    # No period rows seeded for either source at all.
+
+    result = predict_best(db_path, LOCATION, window_days=30, min_days=14, target_date=tomorrow)
+
+    assert result["chosen_sources"]["precipitation_sum"] == SOURCE_ACCURATE
+    assert result["predictions"]["precipitation_sum"] == 3.0
+
+    with connect_periods(get_periods_db_path(db_path)) as pconn:
+        rows = pconn.execute(
+            "SELECT period FROM best_predictions_periods WHERE location_name = ? AND forecast_date = ?",
+            (LOCATION.name, tomorrow.isoformat()),
+        ).fetchall()
+    assert rows == []

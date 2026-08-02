@@ -403,17 +403,18 @@ def _backtest_best(
         ]
         return None if row.empty else float(row["predicted"].iloc[0])
 
-    predictions, chosen = _predictions_for_date(pool, target_date, window_days, min_days, value_for)
+    def periods_for(model: str) -> dict[str, float | None]:
+        return _period_values_for_model(periods_conn, location, model, target_date)
+
+    predictions, chosen, period_values = _predictions_for_date(pool, target_date, window_days, min_days, value_for, periods_for)
     if not predictions:
         return "skipped_no_eligible_candidate"
 
     generated_at = _generated_at_for(target_date)
     _insert_best_prediction(conn, location, d_iso, generated_at, window_days, min_days, predictions)
 
-    if "precipitation_sum" in chosen:
-        period_values = _period_values_for_model(periods_conn, location, chosen["precipitation_sum"], target_date)
-        if any(v is not None for v in period_values.values()):
-            _insert_best_period_predictions(periods_conn, location, d_iso, generated_at, window_days, min_days, period_values)
+    if "precipitation_sum" in chosen and any(v is not None for v in period_values.values()):
+        _insert_best_period_predictions(periods_conn, location, d_iso, generated_at, window_days, min_days, period_values)
 
     return "written"
 
