@@ -174,6 +174,16 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 .legend-key span.swatch.swatch-gradient { height: 8px; background: linear-gradient(90deg, var(--raw-grad-a), var(--raw-grad-b)); }
 #legend-baselines { display: flex; gap: 14px 18px; flex-wrap: wrap; }
 
+.narrative-section {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 22px;
+}
+.narrative-date { font-size: 12px; font-weight: 650; color: var(--text-muted); margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.02em; }
+.narrative-text { font-size: 14.5px; line-height: 1.5; color: var(--text-primary); margin: 0; }
+
 .recent-forecast-section { margin-bottom: 28px; }
 .recent-forecast-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
 
@@ -285,7 +295,7 @@ footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
     <div class="chip-row">
       <span class="chip" id="location-chip">30 location(s) pooled</span>
       <span class="chip">last 90d &middot; 2026-05-04 &rarr; 2026-08-01</span>
-      <span class="chip">generated 2026-08-03T00:38</span>
+      <span class="chip">generated 2026-08-03T02:22</span>
     </div>
   </header>
   <div class="subnav">
@@ -304,6 +314,10 @@ footer { color: var(--text-muted); font-size: 12px; margin-top: 20px; }
       <button id="theme-toggle" class="theme-toggle" type="button">Dark mode</button>
     </div>
   </div>
+  <section class="narrative-section" id="narrative-section" style="display:none">
+  <p class="narrative-date" id="narrative-date">2026-08-03</p>
+  <p class="narrative-text" id="narrative-text">Tomorrow in Sydney will be a pleasant winter&#x27;s day with a high of 21 degrees and a low of 8 degrees. The sky will be mostly sunny with just light cloud cover. There&#x27;s a chance of some light rain in the afternoon and evening, though it won&#x27;t amount to much. It will be a bit breezy with winds around 14 kilometres per hour and gusts reaching 35 kilometres per hour.</p>
+</section>
   <section class="recent-forecast-section" id="recent-forecast-section" style="display:none">
   <h2>Recent forecasts</h2>
   <div class="day-tabs" id="day-tabs"><button type="button" class="day-tab active" data-day-tab="0">2026-08-03</button><button type="button" class="day-tab" data-day-tab="1">2026-08-02</button><button type="button" class="day-tab" data-day-tab="2">2026-08-01</button><button type="button" class="day-tab" data-day-tab="3">2026-07-31</button><button type="button" class="day-tab" data-day-tab="4">2026-07-30</button></div>
@@ -1010,6 +1024,7 @@ function renderCharts() {
   if (locationField) locationField.classList.toggle("is-filtered", loc !== "__ALL__");
   localStorage.setItem("weather-report-location", loc);
   localStorage.setItem("weather-report-show-baselines", showBaselines ? "1" : "0");
+  if (typeof updateNarrative === "function") updateNarrative(loc);
   if (typeof updateRecentForecast === "function") updateRecentForecast(loc);
   if (typeof updateDataQuality === "function") updateDataQuality(loc);
 }
@@ -1032,6 +1047,55 @@ document.addEventListener("DOMContentLoaded", function () {
   select.addEventListener("change", renderCharts);
   baselineToggle.addEventListener("change", renderCharts);
 });
+</script>
+
+
+<script>
+window.__NARRATIVE_DATA = {};
+window.__NARRATIVE_DATA["Sydney"] = {"date": "2026-08-03", "narrative": "Tomorrow in Sydney will be a pleasant winter's day with a high of 21 degrees and a low of 8 degrees. The sky will be mostly sunny with just light cloud cover. There's a chance of some light rain in the afternoon and evening, though it won't amount to much. It will be a bit breezy with winds around 14 kilometres per hour and gusts reaching 35 kilometres per hour."};
+window.__NARRATIVE_DATA["Melbourne"] = {"date": "2026-08-03", "narrative": "Tomorrow in Melbourne will be a cool day with a high of 14 degrees and a low of 8 degrees. Rain is very likely, with most of it falling overnight and tapering off through the morning, leaving the afternoon dry. Cloud cover will be relatively light for much of the day. It will be quite windy with gusts expected to reach around 46 kilometres per hour."};
+window.__NARRATIVE_DATA["Brisbane"] = {"date": "2026-08-03", "narrative": "Tomorrow in Brisbane will be a pleasant late winter day with a high of 21 degrees and a low of 10 degrees. It will be mostly sunny with just light winds around 8 kilometres per hour, though you may experience occasional gusts up to 18 kilometres per hour. There's a slight chance of a little rain in the afternoon, but most of the day should stay dry."};
+window.__NARRATIVE_DATA["Perth"] = {"date": "2026-08-03", "narrative": "Tomorrow in Perth will be a mild day with a high of 21 degrees and a low of 10 degrees. It will be mostly sunny throughout the day, though rain is likely to move in during the evening, bringing around 4mm of precipitation. Conditions will be windy with gusts reaching 35 kilometres per hour."};
+window.__NARRATIVE_DATA["Adelaide"] = {"date": "2026-08-03", "narrative": "Tomorrow in Adelaide will be a cool winter's day with a high of 14 degrees and a low of 10 degrees. Rain is likely, with most of it expected overnight and into the morning, though only light amounts are forecast. Cloud cover will be moderate throughout the day. It will be quite windy with gusts reaching around 40 kilometres per hour, so conditions will feel rather brisk."};
+window.__NARRATIVE_DATA["Hobart"] = {"date": "2026-08-03", "narrative": "Tomorrow in Hobart will be a cool winter's day with a high of 13 degrees and a low of 4 degrees. Rain is likely, with showers expected through the morning and afternoon, though amounts will be light. Cloud cover will be moderate throughout the day. Winds will be gentle overall, though expect occasional gusts that could be a bit stronger."};
+window.__NARRATIVE_DATA["Darwin"] = {"date": "2026-08-03", "narrative": "Tomorrow in Darwin will be a warm day with a high of 31 degrees and a low of 22 degrees. It will be mostly sunny with occasional clouds and no rain expected. Winds will be moderately strong, gusting up to 43 kilometres per hour throughout the day."};
+window.__NARRATIVE_DATA["Canberra"] = {"date": "2026-08-03", "narrative": "Tomorrow in Canberra will be a cold winter's day with a high of 13 degrees and a low of 4 degrees. There's a good chance of rain, most likely in the morning, though any rainfall will be minimal. Mostly sunny conditions are expected with light cloud cover throughout the day. It will be quite windy with gusts reaching up to 52 kilometres per hour, so hold onto your hat."};
+window.__NARRATIVE_DATA["Gold Coast"] = {"date": "2026-08-03", "narrative": "Tomorrow on the Gold Coast will be a pleasant winter's day with a high of 20 degrees and a low of 13 degrees. It will be mostly sunny with just light cloud, and rain is unlikely. There will be a gentle breeze with some occasional gusts, so it should be a nice day to get outside."};
+window.__NARRATIVE_DATA["Newcastle"] = {"date": "2026-08-03", "narrative": "Tomorrow in Newcastle will be a mostly sunny day with a high of 21 degrees and a low of 9 degrees. There's a slight chance of light rain in the afternoon and evening, though most of the day should stay dry. It will be quite windy with gusts reaching 38 kilometres per hour, so you may notice the breeze throughout the day."};
+window.__NARRATIVE_DATA["Geelong"] = {"date": "2026-08-03", "narrative": "Tomorrow in Geelong will be a cool winter's day with a high of 13 degrees and a low of 8 degrees. Rain is likely, with most of it expected overnight, though light showers may continue into the morning and afternoon. The sky will be mostly clear to partly cloudy. It will be quite windy with gusts reaching significant speeds, so expect blustery conditions throughout the day."};
+window.__NARRATIVE_DATA["Cairns"] = {"date": "2026-08-03", "narrative": "Tomorrow in Cairns will be mild with a high of 22 degrees and a low of 18 degrees. There's a good chance of rain, primarily during the morning and afternoon with light showers expected. Cloud cover will be substantial at around 70 percent, keeping conditions mostly overcast throughout the day. It will be quite windy with sustained winds around 26 kilometers per hour and gusts reaching up to 65 kilometers per hour, so expect blustery conditions."};
+window.__NARRATIVE_DATA["Townsville"] = {"date": "2026-08-03", "narrative": "Tomorrow in Townsville will be a pleasant winter's day with a high of 25 degrees and a low of 15 degrees. Conditions will be mostly sunny with just a third of the sky covered by cloud. There's virtually no chance of rain. It will be quite windy though, with gusts reaching up to 55 kilometers per hour, so you may notice the breeze throughout the day."};
+window.__NARRATIVE_DATA["Ballarat"] = {"date": "2026-08-03", "narrative": "Tomorrow in Ballarat will be cool with a high of 10 degrees and a low of 4 degrees. Expect rain throughout the day, beginning overnight and continuing into the morning with the heaviest falls, then easing through the afternoon and evening. The sky will be mostly cloudy, and it will be quite windy with gusts reaching 50 kilometres per hour."};
+window.__NARRATIVE_DATA["Bendigo"] = {"date": "2026-08-03", "narrative": "Tomorrow in Bendigo will be a chilly winter's day with a high of 12 degrees and a low of 4 degrees. Rain is likely throughout the day, with the heaviest falls expected in the afternoon, though totals will remain light. Expect mostly cloudy conditions with around 60 percent cloud cover. It will be quite windy with gusts reaching up to 41 kilometers per hour, so be prepared for blustery conditions."};
+window.__NARRATIVE_DATA["Launceston"] = {"date": "2026-08-03", "narrative": "Tomorrow in Launceston will be a wet and cold day with a high of 11 degrees and a low of 5 degrees. Rain is expected throughout the day, with the heaviest falls during the morning. It will be windy with gusts reaching significant strength. Cloud cover will be moderate, though you should be prepared for persistent wet conditions regardless."};
+window.__NARRATIVE_DATA["Wollongong"] = {"date": "2026-08-03", "narrative": "Tomorrow in Wollongong will be a pleasant winter's day with a high of 20 degrees and a low of 9 degrees. It will be mostly sunny throughout the day with just a small chance of a light shower in the afternoon. Winds will be moderate at around 15 kilometres per hour with occasional gusty conditions reaching up to 37 kilometres per hour."};
+window.__NARRATIVE_DATA["Toowoomba"] = {"date": "2026-08-03", "narrative": "Tomorrow in Toowoomba will be a mostly clear winter's day with a high of 18 degrees and a low of 7 degrees. There's virtually no chance of rain. It will be a bit breezy with winds around 8 kilometres per hour and gusts reaching 24 kilometres per hour."};
+window.__NARRATIVE_DATA["Alice Springs"] = {"date": "2026-08-03", "narrative": "Tomorrow in Alice Springs will be a clear and sunny day with a high of 22 degrees and a low of 7 degrees. There's no rain expected. It will be quite windy throughout the day with gusts reaching 40 kilometres per hour, so you may notice some blustery conditions, particularly in the afternoon and evening."};
+window.__NARRATIVE_DATA["Mount Gambier"] = {"date": "2026-08-03", "narrative": "Tomorrow in Mount Gambier will be a chilly day with a high of 12 degrees and a low of 7 degrees. Rain is almost certain, with light showers expected throughout the day starting overnight and continuing through the morning, afternoon, and evening. Cloud cover will be moderate at around half the sky. It will be quite windy with speeds around 24 kilometres per hour and gusts reaching up to 49 kilometres per hour."};
+window.__NARRATIVE_DATA["Lorne"] = {"date": "2026-08-03", "narrative": "Tomorrow in Lorne will be cool with a high of 13 degrees and a low of 7 degrees. Rain is expected throughout the day, starting overnight and continuing through the morning and afternoon before tapering off in the evening, with the heaviest falls in the afternoon. It will be mostly cloudy, and it will be quite windy with gusts expected to reach significant strength."};
+window.__NARRATIVE_DATA["Shoreham"] = {"date": "2026-08-03", "narrative": "Tomorrow in Shoreham will be cool with a high of 12 degrees and a low of 9 degrees. Rain is virtually certain throughout the day, with the heaviest falls expected in the afternoon. Despite the frequent rain, cloud cover will remain moderate at around 44 percent. It will be quite windy with sustained winds around 29 kilometers per hour and gusts reaching up to 59 kilometers per hour, so conditions will feel rather bracing overall."};
+window.__NARRATIVE_DATA["Byron Bay"] = {"date": "2026-08-03", "narrative": "Tomorrow in Byron Bay will be a mild winter's day with a high of 19 degrees and a low of 10 degrees. There's a slight chance of a bit of rain in the morning and afternoon, though it will be minimal. Expect mostly sunny conditions with some cloud cover throughout the day. It will be a bit breezy with winds around 13 kilometres per hour and gusts up to 22 kilometres per hour."};
+window.__NARRATIVE_DATA["Port Douglas"] = {"date": "2026-08-03", "narrative": "Tomorrow in Port Douglas will be mild with a high of 22 degrees and a low of 20 degrees. It will be mostly cloudy throughout the day with a moderate chance of rain, primarily overnight and continuing into the morning with lighter showers expected. Winds will be quite blustery at 22 kilometres per hour with gusts reaching up to 53 kilometres per hour, so it will be noticeably windy."};
+window.__NARRATIVE_DATA["Broome"] = {"date": "2026-08-03", "narrative": "Tomorrow in Broome will be a warm day with a high of 29 degrees and a low of 21 degrees. It will be sunny with virtually no cloud cover, and rain is not expected. There will be moderate winds throughout the day, with gusts reaching up to 28 kilometres per hour."};
+window.__NARRATIVE_DATA["Margaret River"] = {"date": "2026-08-03", "narrative": "Tomorrow in Margaret River will be a cool day with a high of 18 degrees and a low of 8 degrees. Cloud cover will be moderate throughout the day. It will remain dry until the evening when rain is expected to move in, bringing about 11 millimetres of precipitation. Winds will be strong with gusts reaching quite high speeds, so it will be noticeably windy."};
+window.__NARRATIVE_DATA["Yulara"] = {"date": "2026-08-03", "narrative": "Tomorrow in Yulara will be clear and sunny with a high of 23 degrees and a low of 8 degrees. There's no rain expected throughout the day. It will be quite windy with gusts reaching up to 34 kilometres per hour, so you may notice the breeze, particularly in the afternoon and evening."};
+window.__NARRATIVE_DATA["Noosa Heads"] = {"date": "2026-08-03", "narrative": "Tomorrow in Noosa Heads will be a pleasant winter's day with a high of 20 degrees and a low of 13 degrees. The sky will be mostly clear and sunny throughout the day. There's a slight chance of a bit of rain, with the heaviest falls expected in the afternoon, though any showers should be minimal. It will be a windy day with gusts reaching around 34 kilometres per hour, so expect moderate winds overall."};
+window.__NARRATIVE_DATA["Phillip Island"] = {"date": "2026-08-03", "narrative": "Tomorrow on Phillip Island will be a cool day with a high of 13 degrees and a low of 9 degrees. Rain is likely, with most of it falling in the evening when you can expect around 2 millimetres. The morning and afternoon will be mostly dry with just light precipitation. It will be partly cloudy throughout the day. Conditions will be quite windy with gusts reaching 64 kilometres per hour, so expect blustery conditions particularly as the evening rain moves in."};
+window.__NARRATIVE_DATA["Kangaroo Island"] = {"date": "2026-08-03", "narrative": "Tomorrow on Kangaroo Island will be a chilly winter's day with a high of 14 degrees and a low of 7 degrees. It will be mostly sunny with scattered clouds throughout the day, and no rain is expected. It will be windy with gusts reaching 35 kilometres per hour, so you may notice the wind at times during the day."};
+function updateNarrative(loc) {
+  var section = document.getElementById("narrative-section");
+  if (!section) return;
+  var entry = loc ? window.__NARRATIVE_DATA[loc] : null;
+  if (!loc || loc === "__ALL__" || !entry) {
+    section.style.display = "none";
+    return;
+  }
+  section.style.display = "";
+  var dateEl = document.getElementById("narrative-date");
+  if (dateEl) dateEl.textContent = entry.date;
+  var textEl = document.getElementById("narrative-text");
+  if (textEl) textEl.textContent = entry.narrative;
+}
 </script>
 
 
