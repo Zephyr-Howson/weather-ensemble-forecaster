@@ -246,6 +246,64 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
     return data
 
 
+def _narrative_data(db_path: Path, locations: list[Location]) -> dict[str, dict | None]:
+    """Per location, the latest stored best_narratives row (see narrative.py)
+    - None when no narrative exists yet for that location (no
+    ANTHROPIC_API_KEY configured, the LLM call failed for any reason, or
+    --narrate-best just hasn't run yet). The section stays hidden entirely
+    for a location with no entry, exactly like a source with no data at all
+    - never a broken or stale-looking segment.
+    """
+    data: dict[str, dict | None] = {}
+    with db.connect(db_path) as conn:
+        for location in locations:
+            row = conn.execute(
+                "SELECT forecast_date, narrative FROM best_narratives WHERE location_name = ? "
+                "ORDER BY forecast_date DESC, generated_at DESC LIMIT 1",
+                (location.name,),
+            ).fetchone()
+            data[location.name] = {"date": row["forecast_date"], "narrative": row["narrative"]} if row is not None else None
+    return data
+
+
+def _narrative_html(narrative_data: dict[str, dict | None], sample_location: str) -> str:
+    """Rendered once for a sample location purely as the pre-JS document
+    structure, matching _recent_forecast_html's approach below - starts
+    hidden since the default location selection is "All locations" (pooled),
+    and updateNarrative (see _narrative_script) fills in the real selected
+    location's narrative as soon as it resolves the current dropdown value.
+    """
+    sample = narrative_data.get(sample_location)
+    date_text = escape(sample["date"]) if sample else ""
+    text = escape(sample["narrative"]) if sample else ""
+    return f"""<section class="narrative-section" id="narrative-section" style="display:none">
+  <p class="narrative-date" id="narrative-date">{date_text}</p>
+  <p class="narrative-text" id="narrative-text">{text}</p>
+</section>"""
+
+
+def _narrative_script(narrative_data: dict[str, dict | None]) -> str:
+    return f"""
+<script>
+{_js_object_assignment("__NARRATIVE_DATA", narrative_data)}
+function updateNarrative(loc) {{
+  var section = document.getElementById("narrative-section");
+  if (!section) return;
+  var entry = loc ? window.__NARRATIVE_DATA[loc] : null;
+  if (!loc || loc === "__ALL__" || !entry) {{
+    section.style.display = "none";
+    return;
+  }}
+  section.style.display = "";
+  var dateEl = document.getElementById("narrative-date");
+  if (dateEl) dateEl.textContent = entry.date;
+  var textEl = document.getElementById("narrative-text");
+  if (textEl) textEl.textContent = entry.narrative;
+}}
+</script>
+"""
+
+
 def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: str) -> str:
     """Rendered once for a sample location purely as the pre-JS document
     structure - the section starts hidden (style="display:none") since the
@@ -916,6 +974,16 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 .legend-key span.swatch.swatch-gradient { height: 8px; background: linear-gradient(90deg, var(--raw-grad-a), var(--raw-grad-b)); }
 #legend-baselines { display: flex; gap: 14px 18px; flex-wrap: wrap; }
 
+.narrative-section {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-bottom: 22px;
+}
+.narrative-date { font-size: 12px; font-weight: 650; color: var(--text-muted); margin: 0 0 6px; text-transform: uppercase; letter-spacing: 0.02em; }
+.narrative-text { font-size: 14.5px; line-height: 1.5; color: var(--text-primary); margin: 0; }
+
 .recent-forecast-section { margin-bottom: 28px; }
 .recent-forecast-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
 
@@ -1187,6 +1255,7 @@ function renderCharts() {{
   if (locationField) locationField.classList.toggle("is-filtered", loc !== "__ALL__");
   localStorage.setItem("weather-report-location", loc);
   localStorage.setItem("weather-report-show-baselines", showBaselines ? "1" : "0");
+  if (typeof updateNarrative === "function") updateNarrative(loc);
   if (typeof updateRecentForecast === "function") updateRecentForecast(loc);
   if (typeof updateDataQuality === "function") updateDataQuality(loc);
 }}
@@ -1241,6 +1310,11 @@ def build_html_report(
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    narrative_data = _narrative_data(db_path, AUSTRALIAN_LOCATIONS)
+    sample_narrative_location = next(iter(narrative_data), "")
+    narrative_html = _narrative_html(narrative_data, sample_narrative_location)
+    narrative_script = _narrative_script(narrative_data)
 
     recent_data = _recent_forecast_data(db_path, AUSTRALIAN_LOCATIONS)
     # Purely the pre-JS document structure - the section starts hidden and JS
@@ -1423,6 +1497,7 @@ def build_html_report(
       <button id="theme-toggle" class="theme-toggle" type="button">Dark mode</button>
     </div>
   </div>
+  {narrative_html}
   {recent_forecast_html}
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
   <p class="section-sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; bar/line order stays fixed to the all-locations ranking when you switch locations.</p>
@@ -1436,6 +1511,7 @@ def build_html_report(
 </div>
 {_theme_script(theme_traces)}
 {_controls_script(location_data)}
+{narrative_script}
 {recent_forecast_script}
 {data_quality_script}
 {_toolbar_height_script()}

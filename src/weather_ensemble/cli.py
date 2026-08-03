@@ -31,6 +31,7 @@ from weather_ensemble.ml import (
     train_models,
     train_period_model,
 )
+from weather_ensemble.narrative import generate_and_store_best_narrative
 from weather_ensemble.phases import deploy_all_phases
 from weather_ensemble.report import build_html_report
 from weather_ensemble.scoring import build_period_predictions_long, build_predictions_long
@@ -155,6 +156,13 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DAYS",
         help="Walk-forward: regenerate the adaptive 'Best' prediction for each of the past DAYS days, "
         "using only data available before that date. Skips dates that already have a prediction.",
+    )
+    parser.add_argument(
+        "--narrate-best",
+        action="store_true",
+        help="Generate a brief natural-language weather narrative for tomorrow's 'Best' prediction via "
+        "a single Claude API call (requires ANTHROPIC_API_KEY - silently skipped, not an error, if unset "
+        "or the call fails for any reason). Needs --predict-best to have already run for this date.",
     )
     parser.add_argument(
         "--all-locations",
@@ -418,6 +426,19 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
             _print_json(result)
         ok &= _guarded(location, "predict_best", _predict_best)
 
+    if args.narrate_best:
+        # Runs after --predict-best above - it just reads whatever Best
+        # already picked for tomorrow (periods included) and asks Claude for
+        # a one-paragraph plain-English summary of it. See narrative.py:
+        # any failure at all (no API key, network error, rate limit,
+        # malformed reply) comes back as a "skipped" result, never an
+        # exception - a bad night for this one small feature should never
+        # sink the rest of the run.
+        def _narrate_best():
+            result = generate_and_store_best_narrative(args.db, location)
+            _print_json(result)
+        ok &= _guarded(location, "narrate_best", _narrate_best)
+
     if args.backtest_best_days:
         def _backtest_best():
             result = backtest_best_predictions(
@@ -468,6 +489,7 @@ def main() -> None:
         args.deploy_phases,
         args.backtest_days,
         args.predict_best,
+        args.narrate_best,
         args.backtest_best_days,
         args.collect_periods,
         args.record_actual_periods,

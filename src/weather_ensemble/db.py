@@ -202,6 +202,18 @@ def init_db(conn: sqlite3.Connection) -> None:
             metadata_json TEXT,
             UNIQUE(location_name, forecast_date, generated_at)
         );
+
+        CREATE TABLE IF NOT EXISTS best_narratives (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            location_name TEXT NOT NULL,
+            lat REAL NOT NULL,
+            lon REAL NOT NULL,
+            forecast_date TEXT NOT NULL,
+            generated_at TEXT NOT NULL,
+            model TEXT NOT NULL,
+            narrative TEXT NOT NULL,
+            UNIQUE(location_name, forecast_date, generated_at)
+        );
         """
     )
 

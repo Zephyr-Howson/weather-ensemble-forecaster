@@ -61,10 +61,11 @@ jobs:
           OPENWEATHERMAP_KEY: ${{ secrets.OPENWEATHERMAP_KEY }}
           WEATHERBIT_KEY: ${{ secrets.WEATHERBIT_KEY }}
           ACCUWEATHER_KEY: ${{ secrets.ACCUWEATHER_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           weather-ensemble \
             --all-locations \
-            --all --window 30 --train --train-window 90 --predict-ml --predict-best \
+            --all --window 30 --train --train-window 90 --predict-ml --predict-best --narrate-best \
             --collect-periods --record-actual-periods --forecast-periods \
             --train-periods --predict-ml-periods \
             --archive-forecasts-days 180

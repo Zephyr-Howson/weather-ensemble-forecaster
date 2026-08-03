@@ -28,6 +28,7 @@ def _base_args(**overrides) -> argparse.Namespace:
         "predict_ml": False,
         "backtest_days": None,
         "predict_best": False,
+        "narrate_best": False,
         "best_min_days": 14,
         "backtest_best_days": None,
         "collect_periods": False,
