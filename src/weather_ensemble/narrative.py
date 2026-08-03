@@ -22,8 +22,7 @@ SYSTEM_PROMPT = (
     - Max and min temperature (assume min in the morning and max in the afternoon).
     - Whether it will rain, and if so how much it will rain and roughly when in the day.
     - Whether it will be sunny or cloudy.
-    - Whether it will be windy (use wind speeds to define the level of windiness, only 
-    quote wind gusts if extreme). 
+    - Whether it will be windy (use wind speeds to define the level of windiness). 
     
     The target audience is a regular person who wants a brief summary of that day's 
     weather. Refer to the day by the name given in the forecast data (e.g. Monday).  
