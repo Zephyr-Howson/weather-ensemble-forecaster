@@ -17,11 +17,13 @@ MAX_OUTPUT_TOKENS = 200
 
 SYSTEM_PROMPT = (
     """
-    You are a weather reporter. You will write a single brief weather summary from the 
-    forecast data given. Cover the max and min temperature, whether it will rain and 
+    You are a weather reporter. You will write a single brief weather summary from the
+    forecast data given. Cover the max and min temperature, whether it will rain and
     roughly when in the day if so, whether it will be mostly sunny or cloudy, and whether
-    its will be windy. The target audience is a regular person who wants a brief summary 
-    of tomorrow's weather. Do not elaborate about what to wear or securing loose items.
+    it will be windy. The target audience is a regular person who wants a brief summary
+    of that day's weather. Refer to the day by the name given in the forecast data (e.g.
+    Monday) - never say "tomorrow" or "today", since this may be read on a different day
+    than it was written. Do not elaborate about what to wear or securing loose items.
     Be consistent when describing the weather, and do not contradict yourself. 
     
     Plain prose only - no headings, bullet points, or markdown formatting. Do not mention 
@@ -58,7 +60,11 @@ def _fetch_best_periods(db_path: Path, location: Location, target_date: date) ->
 def _build_user_prompt(
     location: Location, target_date: date, prediction: dict[str, Any], period_precip: dict[str, float | None]
 ) -> str:
-    lines = [f"Location: {location.name}", f"Date: {target_date.isoformat()}"]
+    lines = [
+        f"Location: {location.name}",
+        f"Day: {target_date.strftime('%A')}",
+        f"Date: {target_date.isoformat()}",
+    ]
 
     max_temp, min_temp = prediction.get("max_temp"), prediction.get("min_temp")
     if max_temp is not None and min_temp is not None:

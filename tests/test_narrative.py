@@ -162,6 +162,7 @@ def test_build_user_prompt_includes_key_fields():
     prompt = narrative._build_user_prompt(LOCATION, TARGET_DATE, prediction, period_precip)
 
     assert "Melbourne" in prompt
+    assert "Day: Sunday" in prompt  # TARGET_DATE (2026-06-21) is a Sunday
     assert "24.3" in prompt and "14.1" in prompt
     assert "39%" in prompt
     assert "2.1mm" in prompt
