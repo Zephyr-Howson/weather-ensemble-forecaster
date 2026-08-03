@@ -34,6 +34,12 @@ from weather_ensemble.ml import (
 from weather_ensemble.narrative import generate_and_store_best_narrative
 from weather_ensemble.phases import deploy_all_phases
 from weather_ensemble.report import build_html_report
+from weather_ensemble.report_archive import (
+    RETENTION_DAYS,
+    list_report_snapshots,
+    load_report_snapshot,
+    save_report_snapshot,
+)
 from weather_ensemble.scoring import build_period_predictions_long, build_predictions_long
 from weather_ensemble.service import (
     _safe_error,
@@ -195,6 +201,19 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=90,
         help="How far back every chart in the accuracy report goes (default 90, ~3 months)",
+    )
+    parser.add_argument(
+        "--list-report-snapshots",
+        action="store_true",
+        help=f"List archived report snapshots (generated_at timestamps, newest first) - see "
+        f"report_archive.py. Snapshots older than {RETENTION_DAYS} days are pruned automatically "
+        f"whenever --accuracy-report saves a new one.",
+    )
+    parser.add_argument(
+        "--extract-report-snapshot",
+        metavar="GENERATED_AT",
+        help="Write one archived snapshot's HTML to reports/archive/<GENERATED_AT>.html - "
+        "see --list-report-snapshots for available timestamps",
     )
     parser.add_argument(
         "--dedupe",
@@ -505,6 +524,8 @@ def main() -> None:
         and not args.dedupe
         and not args.export_blob_backlog
         and args.archive_forecasts_days is None
+        and not args.list_report_snapshots
+        and not args.extract_report_snapshot
     ):
         parser.print_help()
         return
@@ -570,6 +591,24 @@ def main() -> None:
             history_days=args.report_history_days,
         )
         print(f"Wrote accuracy report to {output} ({len(long_df)} scored rows across {len(locations)} location(s))")
+
+        snapshot = save_report_snapshot(args.db, output.read_text(encoding="utf-8"))
+        print(f"Archived report snapshot: {snapshot}")
+
+    if args.list_report_snapshots:
+        for generated_at in list_report_snapshots(args.db):
+            print(generated_at)
+
+    if args.extract_report_snapshot:
+        html = load_report_snapshot(args.db, args.extract_report_snapshot)
+        if html is None:
+            print(f"No archived snapshot found for {args.extract_report_snapshot!r} (see --list-report-snapshots)")
+        else:
+            safe_name = re.sub(r"[^0-9A-Za-z_-]+", "_", args.extract_report_snapshot)
+            extract_path = Path("reports/archive") / f"{safe_name}.html"
+            extract_path.parent.mkdir(parents=True, exist_ok=True)
+            extract_path.write_text(html, encoding="utf-8")
+            print(f"Extracted archived report to {extract_path}")
 
     if exit_code:
         sys.exit(exit_code)

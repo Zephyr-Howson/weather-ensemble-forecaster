@@ -62,6 +62,15 @@ def connect_periods(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def connect_report_archive(db_path: Path) -> sqlite3.Connection:
+    """Dated report snapshots live in their own file - see get_report_archive_db_path."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    init_report_archive_db(conn)
+    return conn
+
+
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
     if column not in existing:
@@ -338,6 +347,20 @@ def init_periods_db(conn: sqlite3.Connection) -> None:
             precipitation_sum REAL,
             metadata_json TEXT,
             UNIQUE(location_name, forecast_date, period, generated_at)
+        );
+        """
+    )
+    conn.commit()
+
+
+def init_report_archive_db(conn: sqlite3.Connection) -> None:
+    """Dated report snapshots, in their own file - see report_archive.py."""
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS report_snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            generated_at TEXT NOT NULL UNIQUE,
+            html_gzip BLOB NOT NULL
         );
         """
     )

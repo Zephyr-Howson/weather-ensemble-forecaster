@@ -12,6 +12,7 @@ dist/
 *.sqlite3
 !data/weather.db
 !data/weather_periods.db
+!data/weather_report_archive.db
 data/raw/*
 data/processed/*
 !data/raw/.gitkeep

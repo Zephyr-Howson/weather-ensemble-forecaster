@@ -182,6 +182,20 @@ def get_periods_db_path(db_path: Path | None = None) -> Path:
     return base.with_name(f"{base.stem}_periods{base.suffix}")
 
 
+def get_report_archive_db_path(db_path: Path | None = None) -> Path:
+    """Dated report snapshots (see report_archive.py) live in their own
+    SQLite file too, for the same reason as get_periods_db_path above: a
+    gzip-compressed HTML blob per day is small individually but not
+    something the main weather.db's routine forecast/prediction queries
+    should ever have to carry alongside them.
+    """
+    env_override = os.getenv("WEATHER_REPORT_ARCHIVE_DB_PATH")
+    if env_override:
+        return Path(env_override)
+    base = db_path if db_path is not None else get_db_path()
+    return base.with_name(f"{base.stem}_report_archive{base.suffix}")
+
+
 def get_default_location() -> Location:
     return Location(
         name=os.getenv("DEFAULT_LOCATION_NAME", "Melbourne"),

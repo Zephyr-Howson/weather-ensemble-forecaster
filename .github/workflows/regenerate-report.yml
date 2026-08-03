@@ -67,19 +67,26 @@ jobs:
       - name: Commit and push the regenerated report
         # Same non-rebasing retry pattern as daily-collect.yml's DB commit -
         # see that step's comment for why. reports/accuracy_report.html is
-        # regenerated wholesale from the DB, not a database of its own, but a
-        # merge conflict on its multi-megabyte Plotly payload would be just
-        # as unresolvable as a binary one in practice.
+        # regenerated wholesale from the DB every time, but
+        # data/weather_report_archive.db (see report_archive.py) accumulates
+        # real, irreplaceable history across runs - a rolling 30 days of
+        # gzip-compressed report snapshots - exactly like weather.db/
+        # weather_periods.db do, so it needs the same re-sync-then-reapply
+        # treatment: a race against another push can only cost this run's
+        # own update (one more fetch-and-retry), never silently discard
+        # snapshots another run already committed.
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           cp reports/accuracy_report.html /tmp/accuracy_report.html
+          cp data/weather_report_archive.db /tmp/weather_report_archive.db
 
           for attempt in 1 2 3 4 5; do
             git fetch origin main
             git reset --hard origin/main
             cp /tmp/accuracy_report.html reports/accuracy_report.html
-            git add reports/accuracy_report.html
+            cp /tmp/weather_report_archive.db data/weather_report_archive.db
+            git add reports/accuracy_report.html data/weather_report_archive.db
             if git diff --cached --quiet; then
               echo "No changes to commit"
               exit 0
