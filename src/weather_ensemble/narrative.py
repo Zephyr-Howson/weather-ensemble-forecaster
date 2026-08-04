@@ -66,7 +66,7 @@ SYSTEM_PROMPT = (
     
     Wind:
     Below 11 km/h wind speed - calm
-    12-19 km/h wind speed - pleasant breeze
+    12-19 km/h wind speed - slightly breezy
     20-28 km/h wind speed - breezy
     29-38 km/h wind speed - windy
     39-61 km/h wind speed - very windy
