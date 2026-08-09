@@ -30,7 +30,9 @@ SYSTEM_PROMPT = (
         - Only use wind speed to define the level of windiness.
         - Only mention gusts if they are severe/dangerous (62+ km/h). 
     - Use the overall report to give a tip for what to wear or what to remember to pack.
-        - Umbrella, sunnies, sunscreen, hat, jacket, etc. Only mention if relevant to the forecast.
+        - Umbrella, sunglasses, sunscreen, hat, jacket, etc. Only mention if relevant to the forecast.
+        - Only mention umbrella if it will rain 5 mm or more, or 2 mm or more in a single period. Otherwise, do not mention an umbrella.
+        - Only mention sunglasses if it will be sunny or mostly sunny. Otherwise, do not mention sunglasses.
     
     The target audience is a regular person who wants a brief summary of that day's weather. 
     Refer to the day by the name given in the forecast data (e.g. Monday). Never say "tomorrow" 
