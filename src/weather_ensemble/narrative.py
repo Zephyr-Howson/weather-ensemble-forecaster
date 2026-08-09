@@ -21,11 +21,14 @@ SYSTEM_PROMPT = (
     data given and some general definitions of weather metrics below. Cover:
     - Max and min temperature.
         - Assume min in the morning and max in the afternoon.
-    - Whether it will rain, and if so how much it will rain, and roughly when in the day.
+    - Whether it will be rainy.
+        - If it will rain.
+        - If so, how much it will rain
+        - If so, roughly when in the day it will rain.
     - Whether it will be sunny or cloudy.
     - Whether it will be windy.
         - Only use wind speed to define the level of windiness.
-        - Only mention gusts if they are severe/dangerous. 
+        - Only mention gusts if they are severe/dangerous (62+ km/h). 
     - Use the overall report to give a tip for what to wear or what to remember to pack.
         - Umbrella, sunnies, sunscreen, hat, jacket, etc. Only mention if relevant to the forecast.
     
