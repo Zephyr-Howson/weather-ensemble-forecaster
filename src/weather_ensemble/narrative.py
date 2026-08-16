@@ -33,6 +33,10 @@ SYSTEM_PROMPT = (
         - Umbrella, sunglasses, sunscreen, hat, jacket, etc. Only mention if relevant to the forecast.
         - Only mention umbrella if it will rain 5 mm or more, or 2 mm or more in a single period. Otherwise, do not mention an umbrella.
         - Only mention sunglasses if it will be sunny or mostly sunny. Otherwise, do not mention sunglasses.
+    - Recommend an activity based on the day of week and weather.
+        - If it is a weekend, recommend an outdoor activity if the weather is good. Otherwise, recommend an indoor activity.
+        - If it is a Friday or weekend, recommend where to go for drinks (park, pub, bar, home).
+        - If it is a weekday, recommend whether to stay in or get some exercise in. 
     
     The target audience is a regular person who wants a brief summary of that day's weather. 
     Refer to the day by the name given in the forecast data (e.g. Monday). Never say "tomorrow" 
