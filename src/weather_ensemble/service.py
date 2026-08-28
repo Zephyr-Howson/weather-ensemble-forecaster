@@ -63,6 +63,81 @@ def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastR
     return records
 
 
+# How far back catch_up_missed_forecasts/missing_ensemble_dates will look for a
+# gap. Bounded rather than scanning all history - a location that's been
+# offline/misconfigured for longer than this needs a deliberate --backfill,
+# not an ever-growing walk-forward reconstruction tacked onto every daily run.
+CATCH_UP_LOOKBACK_DAYS = 10
+
+
+def default_forecast_target_date(db_path: Path, location: Location) -> date:
+    """The date collect/forecast/predict-ml/predict-best/narrate should treat
+    as "tomorrow" today: normally the location's real local tomorrow, but
+    never later than one day past whatever this location's most recent
+    ensemble prediction already covers.
+
+    A run that starts late enough to cross local midnight otherwise computes
+    a "tomorrow" that has silently jumped a full day ahead of where the
+    pipeline actually left off - every one of these call sites used to derive
+    this independently from wall-clock local_today(location) + 1 day, so a
+    delayed run (see the 2026-08-27 incident: collection didn't start until
+    18:53 UTC, ~9 hours late, by which point it was already past midnight in
+    Melbourne) had every step agree on the same wrong, later date rather than
+    erroring - forecast_date 2026-08-28 was never generated at all, and
+    2026-08-29's narrative opened with "Saturday" while the 28th (a Friday)
+    was still the real current day everywhere else. Capping at the real
+    tomorrow (via min()) means a location with no gap behaves exactly as
+    before; a location with a gap gets a clean "no forecast collected yet for
+    this date" from downstream steps instead of a silently mislabeled one -
+    see catch_up_missed_forecasts for how that gap actually gets backfilled
+    so this doesn't just stall on it forever.
+    """
+    live_tomorrow = local_today(location) + timedelta(days=1)
+    with db.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT MAX(forecast_date) FROM ensemble_predictions WHERE location_name = ?",
+            (location.name,),
+        ).fetchone()
+    if not row or not row[0]:
+        return live_tomorrow
+    expected = date.fromisoformat(row[0]) + timedelta(days=1)
+    return min(expected, live_tomorrow)
+
+
+def missing_ensemble_dates(db_path: Path, location: Location) -> list[date]:
+    """Every date in the trailing CATCH_UP_LOOKBACK_DAYS (up to, not
+    including, today) with no ensemble_predictions row for this location.
+
+    Deliberately scans the whole recent window rather than just checking
+    MAX(forecast_date) + 1 == today: once a delayed run has skipped a day and
+    moved on (see default_forecast_target_date), a later date already exists
+    in the table and would hide the earlier gap from a MAX-based check alone.
+
+    Returns [] for a location with no ensemble_predictions history at all -
+    a brand-new location's first-ever run has no "gap" to speak of, and
+    should go through --backfill/--deploy-phases deliberately rather than
+    have every date in the lookback window treated as missing.
+    """
+    today = local_today(location)
+    window_start = today - timedelta(days=CATCH_UP_LOOKBACK_DAYS)
+    with db.connect(db_path) as conn:
+        has_any_history = (
+            conn.execute(
+                "SELECT 1 FROM ensemble_predictions WHERE location_name = ? LIMIT 1", (location.name,)
+            ).fetchone()
+            is not None
+        )
+        if not has_any_history:
+            return []
+        rows = conn.execute(
+            "SELECT DISTINCT forecast_date FROM ensemble_predictions "
+            "WHERE location_name = ? AND forecast_date >= ? AND forecast_date < ?",
+            (location.name, window_start.isoformat(), today.isoformat()),
+        ).fetchall()
+    existing = {date.fromisoformat(r[0]) for r in rows}
+    return [d for d in (window_start + timedelta(days=i) for i in range(CATCH_UP_LOOKBACK_DAYS)) if d not in existing]
+
+
 def record_actual(db_path: Path, location: Location, target_date: date | None = None) -> None:
     if target_date is None:
         target_date = local_today(location) - timedelta(days=1)
@@ -285,7 +360,7 @@ def blend_forecast(db_path: Path, location: Location, window_days: int, target_d
     know yet" at that point in time, matching the walk-forward backtest's rule.
     """
     if target_date is None:
-        target_date = local_today(location) + timedelta(days=1)
+        target_date = default_forecast_target_date(db_path, location)
     forecast_df = latest_forecasts_for_date(db_path, location, target_date)
     if forecast_df.empty:
         return {"error": "No forecasts found. Run collect first.", "forecast_date": target_date.isoformat()}
@@ -425,7 +500,7 @@ def blend_forecast_period(
 ) -> dict[str, Any]:
     """Blend every source's period forecast for target_date (default: tomorrow) - mirrors blend_forecast."""
     if target_date is None:
-        target_date = local_today(location) + timedelta(days=1)
+        target_date = default_forecast_target_date(db_path, location)
     forecast_df = latest_forecast_periods_for_date(db_path, location, period, target_date)
     if forecast_df.empty:
         return {

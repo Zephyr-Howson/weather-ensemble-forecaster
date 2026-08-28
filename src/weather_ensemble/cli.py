@@ -22,6 +22,7 @@ from weather_ensemble.config import (
     get_db_path,
     get_default_location,
     get_rolling_window_days,
+    local_today,
 )
 from weather_ensemble.maintenance import deduplicate
 from weather_ensemble.ml import (
@@ -50,6 +51,7 @@ from weather_ensemble.service import (
     collect_forecasts,
     collect_open_meteo_only,
     export_modelling_table,
+    missing_ensemble_dates,
     reconcile_period_predictions,
     record_actual,
     record_actual_periods,
@@ -308,6 +310,41 @@ def _guarded(location: Location, step: str, fn) -> bool:
         return False
 
 
+def _catch_up_missed_forecasts(args: argparse.Namespace, location: Location) -> dict:
+    """Backfill and walk-forward-reconstruct any recent date this location has
+    no ensemble prediction for, before today's normal collection runs.
+
+    Exists so a run that starts late enough to cross local midnight (see
+    service.default_forecast_target_date's docstring for the 2026-08-27
+    incident this fixes) doesn't leave the skipped date permanently blank: the
+    very next run finds it via service.missing_ensemble_dates, backfills its
+    raw Open-Meteo forecasts (the only sources with an archived-forecast
+    endpoint - see README's source table), walk-forward reconstructs
+    Weighted/ML/Best exactly as --backtest-days/--backtest-best-days already
+    do for manual gap recovery, and regenerates its narrative. A gap found
+    while the missed date is still in progress (i.e. discovered on the same
+    delayed run that caused it) can't be recovered here yet - Open-Meteo's
+    historical-forecast archive only covers completed days - and is simply
+    left for this function to pick up on the next call. Effectively a no-op
+    (one SELECT) once there's nothing missing in the lookback window.
+    """
+    missing = missing_ensemble_dates(args.db, location)
+    if not missing:
+        return {"missing_dates": []}
+
+    gap_days = (local_today(location) - missing[0]).days
+    backfill(args.db, location, gap_days)
+    backtest_predictions(args.db, location, days=gap_days, ensemble_window_days=args.window, train_window_days=args.train_window)
+    backtest_best_predictions(args.db, location, days=gap_days, window_days=args.best_window_days, min_days=args.best_min_days)
+
+    narrated = [
+        target_date.isoformat()
+        for target_date in missing
+        if "narrative" in generate_and_store_best_narrative(args.db, location, target_date=target_date)
+    ]
+    return {"missing_dates": [d.isoformat() for d in missing], "gap_days": gap_days, "narrated": narrated}
+
+
 def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
     model_dir = _location_model_dir(args.model_dir, location)
     ok = True
@@ -323,6 +360,12 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         )
         _print_json(result)
         return ok
+
+    if args.collect or args.all:
+        def _catch_up():
+            result = _catch_up_missed_forecasts(args, location)
+            _print_json(result)
+        ok &= _guarded(location, "catch_up_missed_forecasts", _catch_up)
 
     if args.backfill:
         def _backfill():

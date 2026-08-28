@@ -3,10 +3,9 @@ from __future__ import annotations
 import json
 import pickle
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 from sklearn.impute import SimpleImputer
@@ -18,6 +17,7 @@ from sklearn.pipeline import Pipeline
 from weather_ensemble import db
 from weather_ensemble.config import FORECAST_VARIABLES, TARGETS, Location, get_periods_db_path
 from weather_ensemble.service import (
+    default_forecast_target_date,
     latest_forecast_periods_for_date,
     latest_forecasts_for_date,
     load_modelling_table,
@@ -170,8 +170,7 @@ def build_feature_table(db_path: Path, location: Location, window_days: int | No
 def build_prediction_feature_table(db_path: Path, location: Location, target_date: date | None = None) -> pd.DataFrame:
     """Build a wide feature row for target_date (default: tomorrow, in the location's local time)."""
     if target_date is None:
-        local_today = datetime.now(ZoneInfo(location.timezone)).date()
-        target_date = local_today + timedelta(days=1)
+        target_date = default_forecast_target_date(db_path, location)
     long_df = latest_forecasts_for_date(db_path, location, target_date)
     return _build_wide_feature_table(long_df, include_targets=False)
 
@@ -323,7 +322,7 @@ def build_period_prediction_feature_table(
 ) -> pd.DataFrame:
     """Mirrors build_prediction_feature_table, one period at a time."""
     if target_date is None:
-        target_date = datetime.now(ZoneInfo(location.timezone)).date() + timedelta(days=1)
+        target_date = default_forecast_target_date(db_path, location)
     long_df = latest_forecast_periods_for_date(db_path, location, period, target_date)
     return _build_wide_feature_table(long_df, include_targets=False)
 

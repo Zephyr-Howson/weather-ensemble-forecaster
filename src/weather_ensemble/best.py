@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,7 +24,7 @@ from weather_ensemble.scoring import (
     MODEL_ML,
     build_predictions_long,
 )
-from weather_ensemble.service import latest_forecasts_for_date
+from weather_ensemble.service import default_forecast_target_date, latest_forecasts_for_date
 
 # "Best" picks, independently per target, whichever candidate - a raw
 # source, the Weighted blend, or the ML model - had the lowest MAE for that
@@ -397,7 +397,7 @@ def predict_best(
     ever selects among predictions that already exist.
     """
     if target_date is None:
-        target_date = local_today(location) + timedelta(days=1)
+        target_date = default_forecast_target_date(db_path, location)
 
     # build_predictions_long's window_days cutoff is relative to *today*, not
     # target_date - normally the same thing (target_date defaults to

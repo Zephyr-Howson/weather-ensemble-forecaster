@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
 from weather_ensemble import db
-from weather_ensemble.config import PERIODS, Location, get_periods_db_path, local_today
+from weather_ensemble.config import PERIODS, Location, get_periods_db_path
+from weather_ensemble.service import default_forecast_target_date
 
 # Haiku, not Opus/Sonnet: this writes a 2-3 sentence summary from ~10 numbers,
 # once a night per location - the cheapest tier is the right fit for a
@@ -191,7 +192,7 @@ def generate_and_store_best_narrative(
     in cli.py: log and move on, never abort the run.
     """
     if target_date is None:
-        target_date = local_today(location) + timedelta(days=1)
+        target_date = default_forecast_target_date(db_path, location)
 
     prediction = _fetch_best_prediction(db_path, location, target_date)
     if prediction is None:
