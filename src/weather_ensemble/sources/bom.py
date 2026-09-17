@@ -30,8 +30,8 @@ def _geohash(location: Location) -> str:
         raise ValueError("Unexpected BOM location search response structure") from exc
 
 
-def fetch_forecast(location: Location) -> ForecastRecord:
-    """Fetch tomorrow's daily forecast from BOM's public API.
+def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
+    """Fetch target_date's daily forecast from BOM's public API.
 
     This hits api.weather.bom.gov.au, the JSON API behind bom.gov.au's own forecast
     pages. It is reverse-engineered, not an officially documented or supported
@@ -49,9 +49,9 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     payload = response.json()
 
     try:
-        day = payload["data"][1]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Unexpected BOM forecast response structure") from exc
+        day = next(d for d in payload["data"] if _local_date(d["date"], location.timezone) == target_date)
+    except (KeyError, StopIteration, TypeError) as exc:
+        raise ValueError(f"BOM response has no entry for {target_date.isoformat()}") from exc
 
     rain = day.get("rain", {})
     amount = rain.get("amount", {})

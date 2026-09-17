@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+
 from weather_ensemble import retry
 from weather_ensemble.config import Location
 from weather_ensemble.sources import (
@@ -54,7 +56,7 @@ def test_weatherapi_preserves_zero_humidity(monkeypatch):
         ),
     )
 
-    record = weatherapi.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9))
+    record = weatherapi.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9), date(2026, 6, 19))
 
     assert record.humidity == 0
 
@@ -86,7 +88,7 @@ def test_visual_crossing_preserves_zero_values(monkeypatch):
         ),
     )
 
-    record = visual_crossing.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9))
+    record = visual_crossing.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9), date(2026, 6, 19))
 
     assert record.wind_gusts == 0
     assert record.cloud_cover == 0
@@ -125,7 +127,7 @@ def test_openweathermap_aggregates_3hourly_into_daily(monkeypatch):
         ),
     )
 
-    record = openweathermap.fetch_forecast(location)
+    record = openweathermap.fetch_forecast(location, target_date)
 
     assert record.forecast_date == target_date
     assert record.max_temp == 20.0
@@ -167,7 +169,7 @@ def test_weatherbit_converts_wind_to_kmh_and_prefers_slp(monkeypatch):
         ),
     )
 
-    record = weatherbit.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9))
+    record = weatherbit.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9), date(2026, 6, 19))
 
     assert record.wind_speed == 36.0  # 10 m/s -> 36 km/h
     assert record.wind_gusts == 72.0  # 20 m/s -> 72 km/h
@@ -206,7 +208,7 @@ def test_accuweather_two_step_lookup_preserves_zero_values(monkeypatch):
 
     monkeypatch.setattr(retry.requests, "get", fake_get)
 
-    record = accuweather.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9))
+    record = accuweather.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9), date(2026, 6, 19))
 
     assert record.forecast_date.isoformat() == "2026-06-19"
     assert record.wind_speed == 15.0  # AccuWeather's metric wind speed is already km/h
@@ -274,7 +276,9 @@ def test_bom_maps_daily_forecast_and_preserves_zero_values(monkeypatch):
 
     monkeypatch.setattr(retry.requests, "get", fake_get)
 
-    record = bom.fetch_forecast(Location(name="Melbourne", lat=-37.8, lon=144.9, timezone="Australia/Melbourne"))
+    record = bom.fetch_forecast(
+        Location(name="Melbourne", lat=-37.8, lon=144.9, timezone="Australia/Melbourne"), date(2026, 7, 16)
+    )
 
     assert record.forecast_date.isoformat() == "2026-07-16"
     assert record.rain_probability == 0

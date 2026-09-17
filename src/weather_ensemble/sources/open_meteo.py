@@ -92,8 +92,10 @@ def _bucket_hourly_by_period(times: list[str], values: list, target_date: date, 
     return {period: agg(vals) if vals else None for period, vals in buckets.items()}
 
 
-def fetch_forecast_with_periods(location: Location, model: str = "best_match") -> tuple[ForecastRecord, list[ForecastPeriodRecord]]:
-    """Fetch tomorrow's daily forecast and its overnight/morning/afternoon/
+def fetch_forecast_with_periods(
+    location: Location, target_date: date, model: str = "best_match"
+) -> tuple[ForecastRecord, list[ForecastPeriodRecord]]:
+    """Fetch target_date's daily forecast and its overnight/morning/afternoon/
     evening split from a single API call.
 
     These used to be two separate requests, with the daily total taken from
@@ -105,6 +107,12 @@ def fetch_forecast_with_periods(location: Location, model: str = "best_match") -
     and the periods from the same summed hourly array here guarantees the
     daily total always equals the sum of its 4 periods, and halves the
     number of requests this makes.
+
+    forecast_days=3 gives a day of buffer beyond the 2 (today + tomorrow)
+    ever actually needed - a run delayed enough to reach this fetch after
+    target_date has already slipped by a day still finds it in the response
+    (by searching daily.time for an exact match) instead of blindly trusting
+    a fixed index into Open-Meteo's own day-0-is-today ordering.
     """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -120,8 +128,10 @@ def fetch_forecast_with_periods(location: Location, model: str = "best_match") -
     payload = response.json()
     daily = payload["daily"]
     hourly = payload.get("hourly", {})
-    idx = 1
-    target_date = date.fromisoformat(daily["time"][idx])
+    try:
+        idx = daily["time"].index(target_date.isoformat())
+    except ValueError as exc:
+        raise ValueError(f"Open-Meteo {model} response has no entry for {target_date.isoformat()}") from exc
     collected_at = datetime.now(UTC).replace(tzinfo=None)
 
     def hourly_for_target(key: str) -> list:

@@ -21,8 +21,8 @@ def _kmh(value: object) -> float | None:
     return round(ms * 3.6, 3) if ms is not None else None
 
 
-def fetch_forecast(location: Location) -> ForecastRecord:
-    """Fetch tomorrow's forecast from Weatherbit's 16-day daily forecast endpoint.
+def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
+    """Fetch target_date's forecast from Weatherbit's 16-day daily forecast endpoint.
 
     Requires WEATHERBIT_KEY in your .env. This collector is live-forecast only;
     historical backfill remains Open-Meteo's job.
@@ -36,15 +36,17 @@ def fetch_forecast(location: Location) -> ForecastRecord:
         "lat": location.lat,
         "lon": location.lon,
         "key": api_key,
-        "days": 2,
+        # One day of buffer beyond the 2 ever actually needed - see
+        # weatherapi.py's identical comment for why.
+        "days": 3,
     }
     response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)
     payload = response.json()
 
     try:
-        day = payload["data"][1]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Unexpected Weatherbit response structure") from exc
+        day = next(d for d in payload["data"] if d.get("valid_date") == target_date.isoformat())
+    except (KeyError, StopIteration, TypeError) as exc:
+        raise ValueError(f"Weatherbit response has no entry for {target_date.isoformat()}") from exc
 
     weather = day.get("weather") or {}
     # Weatherbit's daily forecast exposes both surface pressure ("pres") and

@@ -26,16 +26,16 @@ def _mean_hourly(hourly: list[dict], key: str) -> float | None:
     return round(sum(vals) / len(vals), 3) if vals else None
 
 
-def fetch_forecast(location: Location) -> ForecastRecord:
-    """Fetch tomorrow's forecast from wttr.in."""
+def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
+    """Fetch target_date's forecast from wttr.in."""
     url = f"https://wttr.in/{location.lat},{location.lon}"
     response = get_with_retry(url, params={"format": "j1"}, timeout=TIMEOUT_SECONDS)
     payload = response.json()
 
     try:
-        day = payload["weather"][1]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Unexpected wttr.in response structure") from exc
+        day = next(d for d in payload["weather"] if d.get("date") == target_date.isoformat())
+    except (KeyError, StopIteration, TypeError) as exc:
+        raise ValueError(f"wttr.in response has no entry for {target_date.isoformat()}") from exc
 
     hourly = day.get("hourly", [])
 

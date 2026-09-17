@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from weather_ensemble.config import TIMEOUT_SECONDS, Location, local_today
+from weather_ensemble.config import TIMEOUT_SECONDS, Location
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.retry import get_with_retry
 
@@ -47,8 +47,8 @@ def _local_date_from_timestamp(ts: float, location: Location) -> date:
     return datetime.fromtimestamp(ts, tz=tz).date()
 
 
-def fetch_forecast(location: Location) -> ForecastRecord:
-    """Fetch tomorrow's forecast from OpenWeatherMap's free 5 Day / 3 Hour Forecast endpoint.
+def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
+    """Fetch target_date's forecast from OpenWeatherMap's free 5 Day / 3 Hour Forecast endpoint.
 
     Requires OPENWEATHERMAP_KEY in your .env. Deliberately uses /data/2.5/forecast
     rather than One Call 3.0: 2.5 is included in every free plan with no card
@@ -76,7 +76,6 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     except (KeyError, TypeError) as exc:
         raise ValueError("Unexpected OpenWeatherMap response structure") from exc
 
-    target_date = local_today(location) + timedelta(days=1)
     day_entries = [e for e in entries if _local_date_from_timestamp(e["dt"], location) == target_date]
     if not day_entries:
         raise ValueError(f"No OpenWeatherMap 3-hour entries found for {target_date.isoformat()}")

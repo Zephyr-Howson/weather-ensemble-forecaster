@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 
-from weather_ensemble.config import TIMEOUT_SECONDS, Location, local_today
+from weather_ensemble.config import TIMEOUT_SECONDS, Location
 from weather_ensemble.models import ForecastRecord
 from weather_ensemble.retry import get_with_retry
 
@@ -27,8 +27,8 @@ def _mean(items: list[dict], key: str) -> float | None:
     return round(sum(values) / len(values), 3) if values else None
 
 
-def fetch_forecast(location: Location) -> ForecastRecord:
-    """Fetch tomorrow's forecast from Visual Crossing Timeline API.
+def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
+    """Fetch target_date's forecast from Visual Crossing Timeline API.
 
     Requires VISUAL_CROSSING_KEY in your .env. This collector is live-forecast
     only in this project; historical forecast archive access varies by Visual
@@ -38,10 +38,9 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     if not api_key:
         raise RuntimeError("VISUAL_CROSSING_KEY is not set. Add it to .env to enable Visual Crossing.")
 
-    target = local_today(location) + timedelta(days=1)
     url = (
         "https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/"
-        f"{location.lat},{location.lon}/{target.isoformat()}/{target.isoformat()}"
+        f"{location.lat},{location.lon}/{target_date.isoformat()}/{target_date.isoformat()}"
     )
     params = {
         "key": api_key,

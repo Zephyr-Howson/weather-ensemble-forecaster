@@ -38,10 +38,18 @@ than one provider having a bad night).
 
 ## Forecast sources
 
-Every source implements `fetch_forecast(location) -> ForecastRecord`, always
-for **tomorrow** relative to when it's called (this project has no same-day
-or multi-day-ahead forecasting — everything is a 1-day-ahead prediction). The
-table below reflects what's actually wired into `sources/__init__.py` today.
+Every source implements `fetch_forecast(location, target_date) -> ForecastRecord`
+(this project has no same-day or multi-day-ahead forecasting — everything is
+a 1-day-ahead prediction). `target_date` is resolved exactly once per
+location by `collect_forecasts` (via `default_forecast_target_date`, the same
+gap-aware "expected next date, capped at wall-clock tomorrow" logic the
+Weighted/ML/Best layer already used) and passed to every source - not
+recomputed independently inside each fetcher. A source that can't find data
+for that exact date in its response raises, rather than silently substituting
+a different one; this is what protects raw collection from a GitHub Actions
+scheduled run that starts hours late (a real, ongoing incident - see
+`sources/__init__.py`'s `ForecastFetcher` docstring). The table below
+reflects what's actually wired into `sources/__init__.py` today.
 
 | Source (`source` column) | What it is | Cost / key | Backfillable? |
 |---|---|---|---|

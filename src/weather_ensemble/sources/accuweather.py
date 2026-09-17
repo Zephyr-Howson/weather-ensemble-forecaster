@@ -26,8 +26,8 @@ def _get_location_key(location: Location, api_key: str) -> str:
         raise ValueError("Unexpected AccuWeather geoposition response structure") from exc
 
 
-def fetch_forecast(location: Location) -> ForecastRecord:
-    """Fetch tomorrow's forecast from AccuWeather's 5-day daily forecast endpoint.
+def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
+    """Fetch target_date's forecast from AccuWeather's 5-day daily forecast endpoint.
 
     Requires ACCUWEATHER_KEY in your .env. This collector is live-forecast only;
     historical backfill remains Open-Meteo's job.
@@ -49,9 +49,9 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     payload = response.json()
 
     try:
-        day = payload["DailyForecasts"][1]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Unexpected AccuWeather forecast response structure") from exc
+        day = next(d for d in payload["DailyForecasts"] if date.fromisoformat(d["Date"][:10]) == target_date)
+    except (KeyError, StopIteration, TypeError) as exc:
+        raise ValueError(f"AccuWeather response has no entry for {target_date.isoformat()}") from exc
 
     day_part = day.get("Day", {})
     temperature = day.get("Temperature", {})

@@ -27,8 +27,8 @@ def _mean(items: list[dict], key: str) -> float | None:
     return round(sum(values) / len(values), 3) if values else None
 
 
-def fetch_forecast(location: Location) -> ForecastRecord:
-    """Fetch tomorrow's forecast from WeatherAPI.com.
+def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
+    """Fetch target_date's forecast from WeatherAPI.com.
 
     Requires WEATHERAPI_KEY in your .env. This collector is live-forecast only;
     WeatherAPI's history endpoint returns past observations, not archived
@@ -43,7 +43,11 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     params = {
         "key": api_key,
         "q": f"{location.lat},{location.lon}",
-        "days": 2,
+        # Requests one extra day of buffer beyond the 2 ever actually needed
+        # (today + tomorrow) - a run delayed enough to reach this fetch after
+        # its intended target_date has already slipped by a day still finds
+        # it in the response instead of silently matching the wrong index.
+        "days": 3,
         "aqi": "no",
         "alerts": "no",
     }
@@ -51,9 +55,10 @@ def fetch_forecast(location: Location) -> ForecastRecord:
     payload = response.json()
 
     try:
-        day = payload["forecast"]["forecastday"][1]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise ValueError("Unexpected WeatherAPI response structure") from exc
+        forecastdays = payload["forecast"]["forecastday"]
+        day = next(d for d in forecastdays if d.get("date") == target_date.isoformat())
+    except (KeyError, StopIteration, TypeError) as exc:
+        raise ValueError(f"WeatherAPI response has no entry for {target_date.isoformat()}") from exc
 
     day_info = day.get("day", {})
     hours = day.get("hour", [])

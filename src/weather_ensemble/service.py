@@ -33,10 +33,18 @@ def _safe_error(exc: Exception) -> str:
 
 
 def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]:
+    """Collect every configured source's forecast for the same single target
+    date, resolved once here via default_forecast_target_date - not left to
+    each fetcher to compute independently. See sources/__init__.py's
+    ForecastFetcher docstring for the incident (a run delayed 5-12 hours by
+    GitHub's own scheduler, silently skipping days of raw collection) this
+    closes.
+    """
+    target_date = default_forecast_target_date(db_path, location)
     records: list[ForecastRecord] = []
     for source_name, fetcher in FORECAST_SOURCES.items():
         try:
-            records.append(fetcher(location))
+            records.append(fetcher(location, target_date))
         except Exception as exc:  # noqa: BLE001 - keep collection robust if one source fails
             print(f"WARN: {source_name} failed: {_safe_error(exc)}")
 
@@ -46,15 +54,16 @@ def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]
 
 
 def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastRecord]:
-    """Collect only Open-Meteo model outputs for tomorrow.
+    """Collect only Open-Meteo model outputs, for the same resolved target date.
 
     This is useful for a completely free/no-key workflow and for debugging the
     core model ensemble without optional external APIs.
     """
+    target_date = default_forecast_target_date(db_path, location)
     records: list[ForecastRecord] = []
     for source_name, fetcher in OPEN_METEO_FORECAST_SOURCES.items():
         try:
-            records.append(fetcher(location))
+            records.append(fetcher(location, target_date))
         except Exception as exc:  # noqa: BLE001 - keep collection robust if one source fails
             print(f"WARN: {source_name} failed: {_safe_error(exc)}")
 
@@ -189,11 +198,15 @@ def collect_forecast_periods(db_path: Path, location: Location) -> int:
     """Small-slice sub-daily rain: live collection, every Open-Meteo model.
 
     Open-Meteo only (not the other 7 providers) - see ForecastPeriodRecord.
+    Uses the same resolved target date as collect_forecasts (not its own
+    independent "tomorrow"), so a delayed run can't disagree with itself
+    about which date periods belong to.
     """
+    target_date = default_forecast_target_date(db_path, location)
     records = []
     for model in OPEN_METEO_MODELS:
         try:
-            records.extend(open_meteo.fetch_forecast_with_periods(location, model=model)[1])
+            records.extend(open_meteo.fetch_forecast_with_periods(location, target_date, model=model)[1])
         except Exception as exc:  # noqa: BLE001 - keep collection robust if one model fails
             print(f"WARN: open_meteo_{model} periods failed: {_safe_error(exc)}")
 
