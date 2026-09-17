@@ -1185,6 +1185,27 @@ function renderCharts() {{
         categories = categories.filter(function (_, i) {{ return !mask[i]; }});
         if (colors) colors = colors.filter(function (_, i) {{ return !mask[i]; }});
       }}
+
+      // Re-rank for this specific location: best (lowest MAE) first, not
+      // the pooled ranking every location used to inherit. Reordering
+      // mae/n/categories/colors together by the same index permutation
+      // keeps each entity's own color attached to it wherever it lands -
+      // only the row position changes, never which color a model gets (that
+      // would be the "recolor-on-filter" bug this design otherwise avoids).
+      // A model absent from this location (mae === null) sorts to the
+      // bottom rather than breaking the comparator.
+      var order = categories.map(function (_, i) {{ return i; }});
+      order.sort(function (a, b) {{
+        if (mae[a] === null && mae[b] === null) return 0;
+        if (mae[a] === null) return 1;
+        if (mae[b] === null) return -1;
+        return mae[a] - mae[b];
+      }});
+      mae = order.map(function (i) {{ return mae[i]; }});
+      n = order.map(function (i) {{ return n[i]; }});
+      categories = order.map(function (i) {{ return categories[i]; }});
+      if (colors) colors = order.map(function (i) {{ return colors[i]; }});
+
       var update = {{
         x: [mae],
         y: [categories],
@@ -1306,10 +1327,15 @@ def build_html_report(
 
     # Every chart defaults to "All locations" (pooled). The dropdown swaps in
     # per-location data client-side via Plotly.restyle rather than building a
-    # separate figure per location - so bar categories / line trace order (and
-    # their colors) are frozen to the pooled ranking and reused unchanged
-    # across every location (identity follows the entity, not a per-location
-    # re-sort - see the "recolor/reorder-on-filter" anti-pattern).
+    # separate figure per location. The bar chart's row order is re-sorted
+    # per location client-side (best MAE first for whichever location is
+    # selected, not frozen to the pooled ranking) - see renderCharts' board
+    # handling in _controls_script. Colors still follow the entity, not the
+    # row position, when that reorder happens - only line trace order (and
+    # its shared x-axis) stays frozen across locations, since the trend
+    # chart's restyle only ever swaps `y`, not `x` (see _trend_figure's
+    # docstring for why an unequal-length x there would misalign, not just
+    # look unsorted).
     location_names = sorted(long_df["location_name"].unique())
     target_slices = {t: long_df[long_df["target"] == t] for t in targets}
     combo_slices = {key: df for key, df in long_df.groupby(["target", "location_name"])}
@@ -1365,8 +1391,12 @@ def build_html_report(
             # hiding them means re-filtering x/y/text/customdata together (never
             # just x) - the same array-length-mismatch trap the location
             # dropdown hit with the trend chart. board_categories is the full
-            # label list so JS can filter it by the same mask it applies to the
-            # values, instead of leaving a label with no bar next to it.
+            # label list, wired to mae/n below by shared array position (still
+            # the pooled ranking's order on the wire) - JS filters it by the
+            # same baseline mask it applies to the values, then re-sorts all
+            # four arrays together by this location's own mae before
+            # rendering, instead of leaving a label with no bar next to it or
+            # showing every location in the pooled order.
             "board_categories": [_bar_display_name(m) for m in board_order],
             "baseline_mask_board": [m in BASELINE_STYLE for m in board_order],
             # The trend chart's baselines are separate traces, so hiding them
@@ -1454,7 +1484,7 @@ def build_html_report(
   </div>
   {recent_forecast_html}
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
-  <p class="section-sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; bar/line order stays fixed to the all-locations ranking when you switch locations.</p>
+  <p class="section-sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; the leaderboard re-ranks best-to-worst for whichever location you pick; trend-line order stays fixed to the all-locations ranking.</p>
   <div class="section-nav">
     <nav class="jump-nav" aria-label="Jump to metric">{jump_nav}</nav>
   </div>
