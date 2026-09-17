@@ -553,6 +553,23 @@ def rolling_error_over_time(long_df: pd.DataFrame, window: int = 7) -> pd.DataFr
     `window // 2` days of the most recent one is recalculated (using more of its
     "after" side) every time this runs, until enough days have passed to fill
     the window on both sides.
+
+    Reindexed onto each (target, model)'s own full calendar date range (its
+    first through its last appearance) before rolling - a real incident: a
+    model with zero scored rows on one date (a genuine collection gap, not
+    something this function should paper over) previously left that date
+    missing from the output entirely, not present-with-NaN, because pandas'
+    groupby only ever produces a row for a (model, date) combination that
+    exists in the input. `.rolling()` returns exactly one output per input
+    row, so a date with no input row got no output value either - visible in
+    the report as the trend line breaking, and unfixable there by any amount
+    of smoothing since there was nothing to smooth *onto*. Reindexing first
+    gives that date a row (abs_error=NaN, contributing nothing to its own or
+    any other date's average - rolling's mean already skips NaN inputs) so
+    the *surrounding* days' real data can produce a genuine window-smoothed
+    value for it, the same way it already would for any other date. Only
+    fills gaps strictly inside a model's own active range - never invents
+    values before its first day or after its last.
     """
     if long_df.empty:
         return long_df
@@ -566,9 +583,13 @@ def rolling_error_over_time(long_df: pd.DataFrame, window: int = 7) -> pd.DataFr
 
     out = []
     for (target, model), group in daily.groupby(["target", "model"]):
-        group = group.sort_values("forecast_date").copy()
-        group["rolling_mae"] = group["abs_error"].rolling(window=window, center=True, min_periods=1).mean()
-        out.append(group)
+        group = group.sort_values("forecast_date").set_index("forecast_date")
+        full_range = pd.date_range(group.index.min(), group.index.max(), freq="D")
+        reindexed = group[["abs_error"]].reindex(full_range)
+        reindexed["rolling_mae"] = reindexed["abs_error"].rolling(window=window, center=True, min_periods=1).mean()
+        reindexed["target"] = target
+        reindexed["model"] = model
+        out.append(reindexed.rename_axis("forecast_date").reset_index())
     return pd.concat(out, ignore_index=True) if out else daily
 
 
