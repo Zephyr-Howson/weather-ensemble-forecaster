@@ -2,8 +2,19 @@ name: Daily forecast collection
 
 on:
   schedule:
-    # 08:00 UTC ~= 18:00 Melbourne (AEST) / 19:00 (AEDT) - an evening collection run.
-    - cron: "0 8 * * *"
+    # ~08:00 UTC ~= 18:00 Melbourne (AEST) / 19:00 (AEDT) - an evening collection run.
+    # Deliberately NOT on the hour: GitHub's shared scheduler queues every
+    # repo's on-the-hour cron triggers together, and top-of-the-hour is its
+    # most congested slot (documented by GitHub itself as a cause of delayed/
+    # dropped scheduled runs). A real incident: every run from 2026-08-27
+    # onward fired 5-12 hours late at "0 8 * * *" - late enough that, combined
+    # with each raw forecast source computing its own "tomorrow" independently
+    # (see collect_forecasts/each sources/*.py fetcher - unlike the
+    # ensemble/ML/Best layer, which default_forecast_target_date already
+    # protects), entire days silently went uncollected for many locations.
+    # Moving off :00 won't fix an already-delayed run by itself, but removes
+    # the single most avoidable cause of the delay in the first place.
+    - cron: "17 8 * * *"
   workflow_dispatch:
 
 concurrency:
