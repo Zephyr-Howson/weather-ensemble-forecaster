@@ -618,6 +618,15 @@ def _trend_figure(
                 opacity=style["opacity"],
                 line={"color": style["light"], "width": style["width"], "dash": style["dash"]},
                 hovertemplate=f"{escape(_display_name(model))}: %{{y:.3f}}<extra></extra>",
+                # A day with zero scored rows for this model (a real collection
+                # gap - see data-quality section) leaves a None in the series,
+                # which Plotly breaks the line on by default. connectgaps draws
+                # straight through instead, bridging isolated missing days
+                # rather than visually fragmenting the trend into disconnected
+                # segments - the rolling window already smooths over a single
+                # missing day's effect on nearby points, so a plain break here
+                # was drawing more attention to the gap than the data warrants.
+                connectgaps=True,
             )
         )
         colors_light.append(style["light"])
