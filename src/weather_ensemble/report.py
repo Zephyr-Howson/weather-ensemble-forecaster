@@ -173,7 +173,13 @@ def weather_condition(cloud_cover: float | None, precipitation_sum: float | None
 
     base_kind, base_label = _cloud_band(cloud_cover)
     if precipitation_sum is not None and precipitation_sum >= _ICON_SHOWERS_MM:
-        return f"{base_kind}_showers", f"{base_label}, showers"
+        # "sunny" has no cloud shape at all (just a sun), so showers on a
+        # "sunny" day borrows mostly_sunny's icon instead - a raincloud has
+        # to come from somewhere. The label stays plain "Showers" either
+        # way; the cloud-band wording was only ever needed to justify which
+        # icon got picked, and showers is the whole story worth saying.
+        icon_kind = "mostly_sunny" if base_kind == "sunny" else base_kind
+        return f"{icon_kind}_showers", "Showers"
     return base_kind, base_label
 
 
@@ -221,9 +227,10 @@ def _weather_icon_svg(kind: str) -> str:
     themed in _PAGE_CSS) rather than being baked in here, so dark mode
     doesn't need a second icon set.
 
-    Each of the 5 cloud-band icons gets a "<kind>_showers" twin (the same
-    sun/cloud layout, plus 2 light rain drops) - showers is light enough
-    that it doesn't override what the sun/cloud mix already looks like (see
+    Each cloud-band icon except "sunny" (a bare sun, no cloud shape at all -
+    see weather_condition) gets a "<kind>_showers" twin: the same sun/cloud
+    layout, plus 2 light rain drops. Showers is light enough that it
+    doesn't override what the sun/cloud mix already looks like (see
     weather_condition's docstring), so unlike rain/storm it isn't its own
     fixed composition.
     """
@@ -239,8 +246,8 @@ def _weather_icon_svg(kind: str) -> str:
         "overcast": _cloud(20, 22, 1.05) + _cloud(29, 30, 0.95),
     }
     parts: dict[str, str] = dict(cloud_band_parts)
-    for band_kind, band_svg in cloud_band_parts.items():
-        parts[f"{band_kind}_showers"] = band_svg + _rain_drops(24, 38, 2)
+    for band_kind in _SHOWERS_ELIGIBLE_KINDS:
+        parts[f"{band_kind}_showers"] = cloud_band_parts[band_kind] + _rain_drops(24, 38, 2)
     parts["rain"] = _cloud(24, 20, 1.05) + _rain_drops(24, 33)
     parts["storm"] = _cloud(24, 18, 1.0) + _bolt(24, 30)
 
@@ -249,9 +256,13 @@ def _weather_icon_svg(kind: str) -> str:
 
 
 _CLOUD_BAND_KINDS = ("sunny", "mostly_sunny", "partly_cloudy", "mostly_cloudy", "overcast")
+# "sunny" has no cloud shape to hang rain drops on - showers on an
+# otherwise-sunny day uses mostly_sunny_showers instead (see
+# weather_condition), so a bare "sunny_showers" icon is never selected.
+_SHOWERS_ELIGIBLE_KINDS = ("mostly_sunny", "partly_cloudy", "mostly_cloudy", "overcast")
 WEATHER_ICON_SVG = {
     kind: _weather_icon_svg(kind)
-    for kind in (*_CLOUD_BAND_KINDS, *(f"{k}_showers" for k in _CLOUD_BAND_KINDS), "rain", "storm")
+    for kind in (*_CLOUD_BAND_KINDS, *(f"{k}_showers" for k in _SHOWERS_ELIGIBLE_KINDS), "rain", "storm")
 }
 
 
@@ -519,7 +530,10 @@ window.__weatherCondition = function (cloudCover, precip) {{
   if (precip !== null && precip !== undefined && precip >= WX_HEAVY_RAIN_MM) return ["storm", "Heavy rain"];
   if (precip !== null && precip !== undefined && precip >= WX_RAIN_MM) return ["rain", "Rain"];
   var band = wxCloudBand(cloudCover);
-  if (precip !== null && precip !== undefined && precip >= WX_SHOWERS_MM) return [band[0] + "_showers", band[1] + ", showers"];
+  if (precip !== null && precip !== undefined && precip >= WX_SHOWERS_MM) {{
+    var iconKind = band[0] === "sunny" ? "mostly_sunny" : band[0];
+    return [iconKind + "_showers", "Showers"];
+  }}
   return band;
 }};
 function updateRecentForecast(loc) {{
