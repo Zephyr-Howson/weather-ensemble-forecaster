@@ -123,21 +123,25 @@ RECENT_UNITS.update({f"precipitation_sum_{period}": "mm" for period in PERIODS})
 # SYSTEM_PROMPT thresholds exactly, so the icon and the narrative text never
 # disagree about whether a day reads as "sunny" or "overcast".
 #
-# The rain/storm icon overrides use narrative.py's "wet"/"heavy rain" bands
-# (5mm, 20mm), not config.RAIN_THRESHOLD_MM (0.2mm, this project's did_rain
-# classification cutoff) - a real mismatch found by screenshot: a 0.7mm
-# trace on an 11%-cloud-cover day showed a full rain-cloud icon while the
-# narrative itself called it "mostly sunny" with "minimal rain expected".
-# 0.2mm is the right cutoff for a binary rain/no-rain classification, but
-# it's far too low to dominate an at-a-glance icon over what's otherwise a
-# sunny day - the icon should track "would a person call this a rainy day",
-# which is what the narrative's own umbrella-worthy threshold means.
+# The showers/rain/storm icon overrides use a 2/5/20mm ladder (not
+# config.RAIN_THRESHOLD_MM, 0.2mm, this project's did_rain classification
+# cutoff) - a real mismatch found by screenshot: a 0.7mm trace on an
+# 11%-cloud-cover day showed a full rain-cloud icon while the narrative
+# itself called it "mostly sunny" with "minimal rain expected". 0.2mm is the
+# right cutoff for a binary rain/no-rain classification, but it's far too
+# low to dominate an at-a-glance icon over what's otherwise a sunny day -
+# the icon should track "would a person call this a rainy day". 5mm/20mm
+# match narrative.py's own "wet"/"heavy rain" bands (its umbrella-worthy
+# threshold); 2mm sits below that as a lighter "showers" tier - still enough
+# to override the cloud-cover icon, but visibly lighter than a full rain
+# cloud (see _weather_icon_svg).
 _CLOUD_BANDS = [
     (10, "sunny", "Sunny"),
     (30, "mostly_sunny", "Mostly sunny"),
     (60, "partly_cloudy", "Partly cloudy"),
     (90, "mostly_cloudy", "Mostly cloudy"),
 ]
+_ICON_SHOWERS_MM = 2.0
 _ICON_RAIN_MM = 5.0
 _ICON_HEAVY_RAIN_MM = 20.0
 
@@ -148,6 +152,8 @@ def weather_condition(cloud_cover: float | None, precipitation_sum: float | None
         return "storm", "Heavy rain"
     if precipitation_sum is not None and precipitation_sum >= _ICON_RAIN_MM:
         return "rain", "Rain"
+    if precipitation_sum is not None and precipitation_sum >= _ICON_SHOWERS_MM:
+        return "showers", "Showers"
     if cloud_cover is None:
         return "partly_cloudy", "Partly cloudy"
     for threshold, kind, label in _CLOUD_BANDS:
@@ -202,10 +208,19 @@ def _weather_icon_svg(kind: str) -> str:
     """
     parts: dict[str, str] = {
         "sunny": _sun(24, 24, 11),
-        "mostly_sunny": _sun(19, 19, 9.5) + _cloud(27, 30, 0.85),
-        "partly_cloudy": _sun(17, 16, 8) + _cloud(26, 28, 1.05),
-        "mostly_cloudy": _sun(14, 13, 6) + _cloud(26, 26, 1.2),
+        # mostly_sunny/partly_cloudy previously shrank the sun *and* grew the
+        # cloud together, so partly_cloudy ended up reading as "mostly
+        # cloudy" instead - the sun should stay the dominant shape all the
+        # way through "partly cloudy"; only mostly_cloudy flips that balance.
+        "mostly_sunny": _sun(19, 18, 10) + _cloud(30, 32, 0.55),
+        "partly_cloudy": _sun(18, 17, 9) + _cloud(28, 30, 0.9),
+        "mostly_cloudy": _sun(15, 14, 6.5) + _cloud(26, 27, 1.1),
         "overcast": _cloud(20, 22, 1.05) + _cloud(29, 30, 0.95),
+        # Showers (2-4.9mm) sits between the cloud bands and full "rain" -
+        # sun still visible (unlike rain/storm, which are sun-less) but with
+        # 2 light drops rather than rain's 3, reading as lighter/more
+        # passing than a solid rain-cloud.
+        "showers": _sun(17, 14, 7) + _cloud(27, 23, 0.85) + _rain_drops(25, 33, 2),
         "rain": _cloud(24, 20, 1.05) + _rain_drops(24, 33),
         "storm": _cloud(24, 18, 1.0) + _bolt(24, 30),
     }
@@ -213,7 +228,10 @@ def _weather_icon_svg(kind: str) -> str:
     return f'<svg class="wx-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">{inner}</svg>'
 
 
-WEATHER_ICON_SVG = {kind: _weather_icon_svg(kind) for kind in ("sunny", "mostly_sunny", "partly_cloudy", "mostly_cloudy", "overcast", "rain", "storm")}
+WEATHER_ICON_SVG = {
+    kind: _weather_icon_svg(kind)
+    for kind in ("sunny", "mostly_sunny", "partly_cloudy", "mostly_cloudy", "overcast", "showers", "rain", "storm")
+}
 
 
 def _format_recent_value(target: str, value, field: str) -> str:
@@ -465,12 +483,14 @@ window.__formatRecentValue = function (target, value, field) {{
 // same rain/storm overrides - so a location swap picks the same icon/label
 // a fresh server render would have, not a client-side guess that could
 // disagree with it.
+var WX_SHOWERS_MM = {_ICON_SHOWERS_MM};
 var WX_RAIN_MM = {_ICON_RAIN_MM};
 var WX_HEAVY_RAIN_MM = {_ICON_HEAVY_RAIN_MM};
 var WX_CLOUD_BANDS = {json.dumps(_CLOUD_BANDS)};
 window.__weatherCondition = function (cloudCover, precip) {{
   if (precip !== null && precip !== undefined && precip >= WX_HEAVY_RAIN_MM) return ["storm", "Heavy rain"];
   if (precip !== null && precip !== undefined && precip >= WX_RAIN_MM) return ["rain", "Rain"];
+  if (precip !== null && precip !== undefined && precip >= WX_SHOWERS_MM) return ["showers", "Showers"];
   if (cloudCover === null || cloudCover === undefined) return ["partly_cloudy", "Partly cloudy"];
   for (var i = 0; i < WX_CLOUD_BANDS.length; i++) {{
     if (cloudCover <= WX_CLOUD_BANDS[i][0]) return [WX_CLOUD_BANDS[i][1], WX_CLOUD_BANDS[i][2]];
@@ -960,6 +980,7 @@ _PAGE_CSS = """
   --wx-partly_cloudy-a: #eef2f5; --wx-partly_cloudy-b: #dde6ee;
   --wx-mostly_cloudy-a: #e3e7ea; --wx-mostly_cloudy-b: #d2dae1;
   --wx-overcast-a: #d8dcdf; --wx-overcast-b: #c7ccd1;
+  --wx-showers-a: #e3edf5; --wx-showers-b: #c3d9ea;
   --wx-rain-a: #cfe0ee; --wx-rain-b: #aec4d8;
   --wx-storm-a: #cbd0da; --wx-storm-b: #9aa3b3;
   --wx-cloud-fill: #9aa5b1;
@@ -978,6 +999,7 @@ _PAGE_CSS = """
     --wx-partly_cloudy-a: #2b3138; --wx-partly_cloudy-b: #1e2429;
     --wx-mostly_cloudy-a: #262a2e; --wx-mostly_cloudy-b: #1a1d20;
     --wx-overcast-a: #202325; --wx-overcast-b: #16181a;
+    --wx-showers-a: #223444; --wx-showers-b: #17262f;
     --wx-rain-a: #1c2a38; --wx-rain-b: #141f2b;
     --wx-storm-a: #1c1e26; --wx-storm-b: #11121a;
     --wx-cloud-fill: #6b7580;
@@ -996,6 +1018,7 @@ _PAGE_CSS = """
   --wx-partly_cloudy-a: #2b3138; --wx-partly_cloudy-b: #1e2429;
   --wx-mostly_cloudy-a: #262a2e; --wx-mostly_cloudy-b: #1a1d20;
   --wx-overcast-a: #202325; --wx-overcast-b: #16181a;
+  --wx-showers-a: #223444; --wx-showers-b: #17262f;
   --wx-rain-a: #1c2a38; --wx-rain-b: #141f2b;
   --wx-storm-a: #1c1e26; --wx-storm-b: #11121a;
   --wx-cloud-fill: #6b7580;
@@ -1160,6 +1183,7 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 .wx-glance[data-wx-kind="partly_cloudy"] { background: linear-gradient(135deg, var(--wx-partly_cloudy-a), var(--wx-partly_cloudy-b)); }
 .wx-glance[data-wx-kind="mostly_cloudy"] { background: linear-gradient(135deg, var(--wx-mostly_cloudy-a), var(--wx-mostly_cloudy-b)); }
 .wx-glance[data-wx-kind="overcast"] { background: linear-gradient(135deg, var(--wx-overcast-a), var(--wx-overcast-b)); }
+.wx-glance[data-wx-kind="showers"] { background: linear-gradient(135deg, var(--wx-showers-a), var(--wx-showers-b)); }
 .wx-glance[data-wx-kind="rain"] { background: linear-gradient(135deg, var(--wx-rain-a), var(--wx-rain-b)); }
 .wx-glance[data-wx-kind="storm"] { background: linear-gradient(135deg, var(--wx-storm-a), var(--wx-storm-b)); }
 .wx-glance-top { display: flex; align-items: center; gap: 14px; }
