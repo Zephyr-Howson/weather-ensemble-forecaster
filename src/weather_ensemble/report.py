@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
@@ -116,6 +117,103 @@ RECENT_UNITS = {
     "pressure_msl": "hPa",
 }
 RECENT_UNITS.update({f"precipitation_sum_{period}": "mm" for period in PERIODS})
+
+# "At a glance" weather condition + icon, shown above the AI narrative in the
+# Recent forecasts card. Cloud-cover bands mirror narrative.py's own
+# SYSTEM_PROMPT thresholds exactly, so the icon and the narrative text never
+# disagree about whether a day reads as "sunny" or "overcast".
+#
+# The rain/storm icon overrides use narrative.py's "wet"/"heavy rain" bands
+# (5mm, 20mm), not config.RAIN_THRESHOLD_MM (0.2mm, this project's did_rain
+# classification cutoff) - a real mismatch found by screenshot: a 0.7mm
+# trace on an 11%-cloud-cover day showed a full rain-cloud icon while the
+# narrative itself called it "mostly sunny" with "minimal rain expected".
+# 0.2mm is the right cutoff for a binary rain/no-rain classification, but
+# it's far too low to dominate an at-a-glance icon over what's otherwise a
+# sunny day - the icon should track "would a person call this a rainy day",
+# which is what the narrative's own umbrella-worthy threshold means.
+_CLOUD_BANDS = [
+    (10, "sunny", "Sunny"),
+    (30, "mostly_sunny", "Mostly sunny"),
+    (60, "partly_cloudy", "Partly cloudy"),
+    (90, "mostly_cloudy", "Mostly cloudy"),
+]
+_ICON_RAIN_MM = 5.0
+_ICON_HEAVY_RAIN_MM = 20.0
+
+
+def weather_condition(cloud_cover: float | None, precipitation_sum: float | None) -> tuple[str, str]:
+    """(icon kind, display label) for a day's at-a-glance summary."""
+    if precipitation_sum is not None and precipitation_sum >= _ICON_HEAVY_RAIN_MM:
+        return "storm", "Heavy rain"
+    if precipitation_sum is not None and precipitation_sum >= _ICON_RAIN_MM:
+        return "rain", "Rain"
+    if cloud_cover is None:
+        return "partly_cloudy", "Partly cloudy"
+    for threshold, kind, label in _CLOUD_BANDS:
+        if cloud_cover <= threshold:
+            return kind, label
+    return "overcast", "Overcast"
+
+
+def _sun(cx: float, cy: float, r: float) -> str:
+    rays = []
+    ray_len, gap = r * 0.65, r * 0.25
+    for angle in range(0, 360, 45):
+        rad = math.radians(angle)
+        x1, y1 = cx + (r + gap) * math.cos(rad), cy + (r + gap) * math.sin(rad)
+        x2, y2 = cx + (r + gap + ray_len) * math.cos(rad), cy + (r + gap + ray_len) * math.sin(rad)
+        rays.append(f'<line x1="{x1:.1f}" y1="{y1:.1f}" x2="{x2:.1f}" y2="{y2:.1f}"/>')
+    return (
+        f'<g class="wx-sun-rays" stroke-width="{r * 0.22:.1f}" stroke-linecap="round">{"".join(rays)}</g>'
+        f'<circle class="wx-sun" cx="{cx}" cy="{cy}" r="{r}"/>'
+    )
+
+
+def _cloud(cx: float, cy: float, scale: float) -> str:
+    return (
+        f'<g class="wx-cloud" transform="translate({cx} {cy}) scale({scale})">'
+        '<circle cx="-9" cy="1" r="7"/><circle cx="2" cy="-6" r="9.5"/><circle cx="12" cy="1.5" r="7.5"/>'
+        '<rect x="-15" y="0" width="34" height="11" rx="5.5"/></g>'
+    )
+
+
+def _rain_drops(cx: float, cy: float, n: int = 3) -> str:
+    spacing = 8
+    start = cx - spacing * (n - 1) / 2
+    lines = "".join(
+        f'<line x1="{start + i * spacing:.1f}" y1="{cy:.1f}" x2="{start + i * spacing - 2.5:.1f}" y2="{cy + 8:.1f}"/>'
+        for i in range(n)
+    )
+    return f'<g class="wx-rain" stroke-width="2.6" stroke-linecap="round">{lines}</g>'
+
+
+def _bolt(cx: float, cy: float) -> str:
+    return f'<path class="wx-bolt" d="M{cx + 2} {cy - 6} L{cx - 5} {cy + 6} L{cx - 1} {cy + 6} L{cx - 4} {cy + 15} L{cx + 7} {cy + 2} L{cx + 2} {cy + 2} Z"/>'
+
+
+def _weather_icon_svg(kind: str) -> str:
+    """One self-contained 48x48 SVG per condition kind - built from a shared
+    sun/cloud/rain/bolt vocabulary (see helpers above) rather than 7 bespoke
+    hand-drawn icons, so they stay visually consistent with each other.
+    Colors come from CSS (wx-sun/wx-cloud/wx-rain/wx-bolt classes, themed in
+    _PAGE_CSS) rather than being baked in here, so dark mode doesn't need a
+    second icon set.
+    """
+    parts: dict[str, str] = {
+        "sunny": _sun(24, 24, 11),
+        "mostly_sunny": _sun(19, 19, 9.5) + _cloud(27, 30, 0.85),
+        "partly_cloudy": _sun(17, 16, 8) + _cloud(26, 28, 1.05),
+        "mostly_cloudy": _sun(14, 13, 6) + _cloud(26, 26, 1.2),
+        "overcast": _cloud(20, 22, 1.05) + _cloud(29, 30, 0.95),
+        "rain": _cloud(24, 20, 1.05) + _rain_drops(24, 33),
+        "storm": _cloud(24, 18, 1.0) + _bolt(24, 30),
+    }
+    inner = parts.get(kind, parts["partly_cloudy"])
+    return f'<svg class="wx-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">{inner}</svg>'
+
+
+WEATHER_ICON_SVG = {kind: _weather_icon_svg(kind) for kind in ("sunny", "mostly_sunny", "partly_cloudy", "mostly_cloudy", "overcast", "rain", "storm")}
 
 
 def _format_recent_value(target: str, value, field: str) -> str:
@@ -252,6 +350,43 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
     return data
 
 
+def _at_a_glance_html(day_idx: int, best: dict) -> str:
+    """The hero weather-app-style summary shown above the AI narrative -
+    icon, condition, max/min temp, and a 4-stat row (rain chance/amount,
+    wind, cloud cover) - all from Best's own prediction, the same source
+    the narrative itself is generated from (see narrative.py), so the icon,
+    the words, and the numbers never disagree with each other.
+
+    Reuses the exact same data-day/data-target/data-field attributes the
+    detailed comparison table already uses (see updateRecentForecast's
+    generic `[data-day="i"]` sweep) for every plain value, so those cells
+    get updated by existing JS for free; only the icon and condition label
+    need their own JS, since a location swap can change which condition a
+    given day falls into.
+    """
+    kind, label = weather_condition(best.get("cloud_cover"), best.get("precipitation_sum"))
+    field = "best"
+
+    def cell(target: str) -> str:
+        return f'<span data-day="{day_idx}" data-target="{target}" data-field="{field}">{escape(_format_recent_value(target, best.get(target), field))}</span>'
+
+    return f"""<div class="wx-glance" data-day-glance="{day_idx}" data-wx-kind="{kind}">
+  <div class="wx-glance-top">
+    <div class="wx-glance-icon" data-day-icon="{day_idx}">{WEATHER_ICON_SVG[kind]}</div>
+    <div class="wx-glance-main">
+      <div class="wx-glance-condition" data-day-condition="{day_idx}">{escape(label)}</div>
+      <div class="wx-glance-temps"><span class="wx-temp-max">{cell("max_temp")}</span><span class="wx-temp-sep">/</span><span class="wx-temp-min">{cell("min_temp")}</span></div>
+    </div>
+  </div>
+  <div class="wx-glance-stats">
+    <div class="wx-stat"><span class="wx-stat-label">Rain</span>{cell("did_rain")}</div>
+    <div class="wx-stat"><span class="wx-stat-label">Amount</span>{cell("precipitation_sum")}</div>
+    <div class="wx-stat"><span class="wx-stat-label">Wind</span>{cell("wind_speed")}</div>
+    <div class="wx-stat"><span class="wx-stat-label">Cloud</span>{cell("cloud_cover")}</div>
+  </div>
+</div>"""
+
+
 def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: str) -> str:
     """Rendered once for a sample location purely as the pre-JS document
     structure - the section starts hidden (style="display:none") since the
@@ -276,6 +411,7 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
             f'<button type="button" class="day-tab{" active" if is_first else ""}" '
             f'data-day-tab="{day_idx}">{escape(day["date"])}</button>'
         )
+        glance = _at_a_glance_html(day_idx, day["best"])
         rows = "".join(
             f"<tr><td>{escape(TARGET_LABELS.get(t, t))}</td>"
             f"<td class='num' data-day='{day_idx}' data-target='{t}' data-field='ensemble'>{escape(_format_recent_value(t, day['ensemble'].get(t), 'ensemble'))}</td>"
@@ -291,6 +427,7 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
         day_cards.append(
             f"""<div class="recent-day-card" data-day-panel="{day_idx}"{hidden_attr}>
   <h3 data-day-label="{day_idx}">{escape(day["date"])}</h3>
+  {glance}
   <p class="day-narrative" data-day-narrative="{day_idx}"{narrative_hidden_attr}>{escape(narrative or "")}</p>
   <div class="recent-day-table-scroll">
     <table>
@@ -314,6 +451,7 @@ def _recent_forecast_script(recent_data: dict) -> str:
 <script>
 {_js_object_assignment("__RECENT_DATA", recent_data)}
 window.__RECENT_UNITS = {json.dumps(RECENT_UNITS)};
+window.__WEATHER_ICONS = {json.dumps(WEATHER_ICON_SVG)};
 window.__formatRecentValue = function (target, value, field) {{
   if (value === null || value === undefined) return "—";
   if (target === "did_rain") {{
@@ -322,6 +460,22 @@ window.__formatRecentValue = function (target, value, field) {{
   }}
   var unit = window.__RECENT_UNITS[target] || "";
   return Number(value).toFixed(1) + unit;
+}};
+// Mirrors weather_condition() in report.py exactly - same cloud-cover bands,
+// same rain/storm overrides - so a location swap picks the same icon/label
+// a fresh server render would have, not a client-side guess that could
+// disagree with it.
+var WX_RAIN_MM = {_ICON_RAIN_MM};
+var WX_HEAVY_RAIN_MM = {_ICON_HEAVY_RAIN_MM};
+var WX_CLOUD_BANDS = {json.dumps(_CLOUD_BANDS)};
+window.__weatherCondition = function (cloudCover, precip) {{
+  if (precip !== null && precip !== undefined && precip >= WX_HEAVY_RAIN_MM) return ["storm", "Heavy rain"];
+  if (precip !== null && precip !== undefined && precip >= WX_RAIN_MM) return ["rain", "Rain"];
+  if (cloudCover === null || cloudCover === undefined) return ["partly_cloudy", "Partly cloudy"];
+  for (var i = 0; i < WX_CLOUD_BANDS.length; i++) {{
+    if (cloudCover <= WX_CLOUD_BANDS[i][0]) return [WX_CLOUD_BANDS[i][1], WX_CLOUD_BANDS[i][2]];
+  }}
+  return ["overcast", "Overcast"];
 }};
 function updateRecentForecast(loc) {{
   var section = document.getElementById("recent-forecast-section");
@@ -359,6 +513,19 @@ function updateRecentForecast(loc) {{
       var value = day[field] ? day[field][target] : null;
       cell.textContent = window.__formatRecentValue(target, value, field);
     }});
+
+    var best = day.best || {{}};
+    var condition = window.__weatherCondition(best.cloud_cover, best.precipitation_sum);
+    var kind = condition[0], conditionLabel = condition[1];
+    var glance = document.querySelector('[data-day-glance="' + i + '"]');
+    if (glance) glance.dataset.wxKind = kind;
+    var conditionEl = document.querySelector('[data-day-condition="' + i + '"]');
+    if (conditionEl) conditionEl.textContent = conditionLabel;
+    var iconEl = document.querySelector('[data-day-icon="' + i + '"]');
+    if (iconEl && iconEl.dataset.wxKind !== kind) {{
+      iconEl.innerHTML = window.__WEATHER_ICONS[kind] || window.__WEATHER_ICONS.partly_cloudy;
+      iconEl.dataset.wxKind = kind;
+    }}
   }});
 }}
 document.addEventListener("DOMContentLoaded", function () {{
@@ -784,6 +951,18 @@ _PAGE_CSS = """
   --text-secondary: #52514e;
   --text-muted: #898781;
   --border: rgba(11,11,11,0.10);
+  /* Weather-condition tokens for the at-a-glance card (see weather_condition
+     in report.py) - one gradient pair per condition kind, light values here,
+     overridden below for dark mode. --wx-cloud-fill is the shared icon fill
+     every _cloud()-built icon uses, not condition-specific. */
+  --wx-sunny-a: #fff2cf; --wx-sunny-b: #d9ecff;
+  --wx-mostly_sunny-a: #fff2cf; --wx-mostly_sunny-b: #e4eef7;
+  --wx-partly_cloudy-a: #eef2f5; --wx-partly_cloudy-b: #dde6ee;
+  --wx-mostly_cloudy-a: #e3e7ea; --wx-mostly_cloudy-b: #d2dae1;
+  --wx-overcast-a: #d8dcdf; --wx-overcast-b: #c7ccd1;
+  --wx-rain-a: #cfe0ee; --wx-rain-b: #aec4d8;
+  --wx-storm-a: #cbd0da; --wx-storm-b: #9aa3b3;
+  --wx-cloud-fill: #9aa5b1;
 }
 @media (prefers-color-scheme: dark) {
   :root:where(:not([data-theme="light"])) {
@@ -794,6 +973,14 @@ _PAGE_CSS = """
     --text-secondary: #c3c2b7;
     --text-muted: #898781;
     --border: rgba(255,255,255,0.10);
+    --wx-sunny-a: #4a3a12; --wx-sunny-b: #16324a;
+    --wx-mostly_sunny-a: #453a18; --wx-mostly_sunny-b: #22303c;
+    --wx-partly_cloudy-a: #2b3138; --wx-partly_cloudy-b: #1e2429;
+    --wx-mostly_cloudy-a: #262a2e; --wx-mostly_cloudy-b: #1a1d20;
+    --wx-overcast-a: #202325; --wx-overcast-b: #16181a;
+    --wx-rain-a: #1c2a38; --wx-rain-b: #141f2b;
+    --wx-storm-a: #1c1e26; --wx-storm-b: #11121a;
+    --wx-cloud-fill: #6b7580;
   }
 }
 :root[data-theme="dark"] {
@@ -804,6 +991,14 @@ _PAGE_CSS = """
   --text-secondary: #c3c2b7;
   --text-muted: #898781;
   --border: rgba(255,255,255,0.10);
+  --wx-sunny-a: #4a3a12; --wx-sunny-b: #16324a;
+  --wx-mostly_sunny-a: #453a18; --wx-mostly_sunny-b: #22303c;
+  --wx-partly_cloudy-a: #2b3138; --wx-partly_cloudy-b: #1e2429;
+  --wx-mostly_cloudy-a: #262a2e; --wx-mostly_cloudy-b: #1a1d20;
+  --wx-overcast-a: #202325; --wx-overcast-b: #16181a;
+  --wx-rain-a: #1c2a38; --wx-rain-b: #141f2b;
+  --wx-storm-a: #1c1e26; --wx-storm-b: #11121a;
+  --wx-cloud-fill: #6b7580;
 }
 
 * { box-sizing: border-box; }
@@ -947,6 +1142,53 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 .recent-forecast-section { margin-bottom: 28px; }
 .day-narrative { font-size: 14.5px; line-height: 1.5; color: var(--text-primary); margin: 0 0 12px; padding: 12px 14px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; }
 .recent-forecast-section h2 { font-size: 16px; font-weight: 650; margin: 0 0 12px; }
+
+/* At-a-glance weather-app card: icon + condition + big max/min temp, then a
+   4-stat row (rain chance/amount, wind, cloud) - see _at_a_glance_html. The
+   gradient background is picked by data-wx-kind (set server-side for the
+   sample location, kept in sync client-side on every location/day change by
+   updateRecentForecast) from the --wx-<kind>-a/b tokens defined above. */
+.wx-glance {
+  border-radius: 14px;
+  padding: 16px 18px 14px;
+  margin: 0 0 12px;
+  border: 1px solid var(--border);
+  background: linear-gradient(135deg, var(--wx-partly_cloudy-a), var(--wx-partly_cloudy-b));
+}
+.wx-glance[data-wx-kind="sunny"] { background: linear-gradient(135deg, var(--wx-sunny-a), var(--wx-sunny-b)); }
+.wx-glance[data-wx-kind="mostly_sunny"] { background: linear-gradient(135deg, var(--wx-mostly_sunny-a), var(--wx-mostly_sunny-b)); }
+.wx-glance[data-wx-kind="partly_cloudy"] { background: linear-gradient(135deg, var(--wx-partly_cloudy-a), var(--wx-partly_cloudy-b)); }
+.wx-glance[data-wx-kind="mostly_cloudy"] { background: linear-gradient(135deg, var(--wx-mostly_cloudy-a), var(--wx-mostly_cloudy-b)); }
+.wx-glance[data-wx-kind="overcast"] { background: linear-gradient(135deg, var(--wx-overcast-a), var(--wx-overcast-b)); }
+.wx-glance[data-wx-kind="rain"] { background: linear-gradient(135deg, var(--wx-rain-a), var(--wx-rain-b)); }
+.wx-glance[data-wx-kind="storm"] { background: linear-gradient(135deg, var(--wx-storm-a), var(--wx-storm-b)); }
+.wx-glance-top { display: flex; align-items: center; gap: 14px; }
+.wx-glance-icon { width: 56px; height: 56px; flex: 0 0 auto; }
+.wx-glance-icon .wx-icon { width: 100%; height: 100%; display: block; }
+.wx-glance-main { flex: 1 1 auto; min-width: 0; }
+.wx-glance-condition { font-size: 13px; font-weight: 600; color: var(--text-secondary); margin-bottom: 2px; }
+.wx-glance-temps { font-size: 32px; font-weight: 700; letter-spacing: -0.02em; line-height: 1; color: var(--text-primary); }
+.wx-temp-sep { color: var(--text-muted); margin: 0 6px; font-weight: 400; }
+.wx-temp-min { color: var(--text-secondary); font-weight: 500; }
+.wx-glance-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.wx-stat { display: flex; flex-direction: column; align-items: center; gap: 2px; text-align: center; }
+.wx-stat-label { font-size: 10.5px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
+.wx-stat span[data-day] { font-size: 15px; font-weight: 650; color: var(--text-primary); font-variant-numeric: tabular-nums; }
+@media (max-width: 420px) {
+  .wx-glance-temps { font-size: 28px; }
+  .wx-stat-label { font-size: 9.5px; }
+  .wx-stat span[data-day] { font-size: 13.5px; }
+}
+
+/* Shared sun/cloud/rain/bolt icon vocabulary every condition composes from
+   (see _sun/_cloud/_rain_drops/_bolt) - colors live here once instead of
+   per-icon, and --wx-cloud-fill (defined above) is the only piece that
+   actually changes between light/dark. */
+.wx-sun-rays { stroke: #f5a623; fill: none; }
+.wx-sun { fill: #f9b338; }
+.wx-cloud { fill: var(--wx-cloud-fill); }
+.wx-rain { stroke: #4a90d9; fill: none; }
+.wx-bolt { fill: #f5c518; }
 
 /* Day picker: one panel visible at a time instead of stacking all 5 days -
    a phone screen would otherwise need to scroll past ~65 table rows before
@@ -1245,12 +1487,35 @@ document.addEventListener("DOMContentLoaded", function () {{
   var baselineToggle = document.getElementById("baseline-toggle");
   if (!select || !baselineToggle) return;
 
-  var storedLoc = localStorage.getItem("weather-report-location");
-  var hasOption = false;
-  for (var i = 0; i < select.options.length; i++) {{
-    if (select.options[i].value === storedLoc) {{ hasOption = true; break; }}
+  // A ?location=<name> URL param (case-insensitive) takes precedence over
+  // the remembered choice, so a link sent to someone else opens straight to
+  // the intended city instead of them having to touch the dropdown - and it
+  // persists to localStorage too, so reopening the same report later
+  // (without the param) keeps landing on that location.
+  var queryLoc = null;
+  try {{
+    var requested = new URLSearchParams(window.location.search).get("location");
+    if (requested) {{
+      for (var j = 0; j < select.options.length; j++) {{
+        if (select.options[j].value.toLowerCase() === requested.toLowerCase()) {{
+          queryLoc = select.options[j].value;
+          break;
+        }}
+      }}
+    }}
+  }} catch (e) {{ /* URLSearchParams unsupported/blocked - fall through to the remembered location */ }}
+
+  if (queryLoc) {{
+    select.value = queryLoc;
+    localStorage.setItem("weather-report-location", queryLoc);
+  }} else {{
+    var storedLoc = localStorage.getItem("weather-report-location");
+    var hasOption = false;
+    for (var i = 0; i < select.options.length; i++) {{
+      if (select.options[i].value === storedLoc) {{ hasOption = true; break; }}
+    }}
+    if (hasOption) select.value = storedLoc;
   }}
-  if (hasOption) select.value = storedLoc;
 
   var storedBaselines = localStorage.getItem("weather-report-show-baselines");
   if (storedBaselines !== null) baselineToggle.checked = storedBaselines === "1";
