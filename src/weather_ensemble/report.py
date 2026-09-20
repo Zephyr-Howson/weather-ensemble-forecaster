@@ -146,20 +146,35 @@ _ICON_RAIN_MM = 5.0
 _ICON_HEAVY_RAIN_MM = 20.0
 
 
-def weather_condition(cloud_cover: float | None, precipitation_sum: float | None) -> tuple[str, str]:
-    """(icon kind, display label) for a day's at-a-glance summary."""
-    if precipitation_sum is not None and precipitation_sum >= _ICON_HEAVY_RAIN_MM:
-        return "storm", "Heavy rain"
-    if precipitation_sum is not None and precipitation_sum >= _ICON_RAIN_MM:
-        return "rain", "Rain"
-    if precipitation_sum is not None and precipitation_sum >= _ICON_SHOWERS_MM:
-        return "showers", "Showers"
+def _cloud_band(cloud_cover: float | None) -> tuple[str, str]:
     if cloud_cover is None:
         return "partly_cloudy", "Partly cloudy"
     for threshold, kind, label in _CLOUD_BANDS:
         if cloud_cover <= threshold:
             return kind, label
     return "overcast", "Overcast"
+
+
+def weather_condition(cloud_cover: float | None, precipitation_sum: float | None) -> tuple[str, str]:
+    """(icon kind, display label) for a day's at-a-glance summary.
+
+    Rain (5mm+) and storm (20mm+) are fixed cloud-only icons regardless of
+    cloud cover - that much rain realistically means substantial cloud
+    either way, so showing a sun there would look wrong more often than
+    right. Showers (2-4.9mm) is light enough that it doesn't imply much
+    about cloud cover on its own, so it keeps whatever sun/cloud mix the
+    cloud-cover band would already show and just adds light rain on top -
+    a mostly-sunny day with an isolated shower still looks mostly sunny.
+    """
+    if precipitation_sum is not None and precipitation_sum >= _ICON_HEAVY_RAIN_MM:
+        return "storm", "Heavy rain"
+    if precipitation_sum is not None and precipitation_sum >= _ICON_RAIN_MM:
+        return "rain", "Rain"
+
+    base_kind, base_label = _cloud_band(cloud_cover)
+    if precipitation_sum is not None and precipitation_sum >= _ICON_SHOWERS_MM:
+        return f"{base_kind}_showers", f"{base_label}, showers"
+    return base_kind, base_label
 
 
 def _sun(cx: float, cy: float, r: float) -> str:
@@ -200,13 +215,19 @@ def _bolt(cx: float, cy: float) -> str:
 
 def _weather_icon_svg(kind: str) -> str:
     """One self-contained 48x48 SVG per condition kind - built from a shared
-    sun/cloud/rain/bolt vocabulary (see helpers above) rather than 7 bespoke
-    hand-drawn icons, so they stay visually consistent with each other.
-    Colors come from CSS (wx-sun/wx-cloud/wx-rain/wx-bolt classes, themed in
-    _PAGE_CSS) rather than being baked in here, so dark mode doesn't need a
-    second icon set.
+    sun/cloud/rain/bolt vocabulary (see helpers above) rather than a dozen
+    bespoke hand-drawn icons, so they stay visually consistent with each
+    other. Colors come from CSS (wx-sun/wx-cloud/wx-rain/wx-bolt classes,
+    themed in _PAGE_CSS) rather than being baked in here, so dark mode
+    doesn't need a second icon set.
+
+    Each of the 5 cloud-band icons gets a "<kind>_showers" twin (the same
+    sun/cloud layout, plus 2 light rain drops) - showers is light enough
+    that it doesn't override what the sun/cloud mix already looks like (see
+    weather_condition's docstring), so unlike rain/storm it isn't its own
+    fixed composition.
     """
-    parts: dict[str, str] = {
+    cloud_band_parts: dict[str, str] = {
         "sunny": _sun(24, 24, 11),
         # mostly_sunny/partly_cloudy previously shrank the sun *and* grew the
         # cloud together, so partly_cloudy ended up reading as "mostly
@@ -216,21 +237,21 @@ def _weather_icon_svg(kind: str) -> str:
         "partly_cloudy": _sun(18, 17, 9) + _cloud(28, 30, 0.9),
         "mostly_cloudy": _sun(15, 14, 6.5) + _cloud(26, 27, 1.1),
         "overcast": _cloud(20, 22, 1.05) + _cloud(29, 30, 0.95),
-        # Showers (2-4.9mm) sits between the cloud bands and full "rain" -
-        # sun still visible (unlike rain/storm, which are sun-less) but with
-        # 2 light drops rather than rain's 3, reading as lighter/more
-        # passing than a solid rain-cloud.
-        "showers": _sun(17, 14, 7) + _cloud(27, 23, 0.85) + _rain_drops(25, 33, 2),
-        "rain": _cloud(24, 20, 1.05) + _rain_drops(24, 33),
-        "storm": _cloud(24, 18, 1.0) + _bolt(24, 30),
     }
+    parts: dict[str, str] = dict(cloud_band_parts)
+    for band_kind, band_svg in cloud_band_parts.items():
+        parts[f"{band_kind}_showers"] = band_svg + _rain_drops(24, 38, 2)
+    parts["rain"] = _cloud(24, 20, 1.05) + _rain_drops(24, 33)
+    parts["storm"] = _cloud(24, 18, 1.0) + _bolt(24, 30)
+
     inner = parts.get(kind, parts["partly_cloudy"])
     return f'<svg class="wx-icon" viewBox="0 0 48 48" aria-hidden="true" focusable="false">{inner}</svg>'
 
 
+_CLOUD_BAND_KINDS = ("sunny", "mostly_sunny", "partly_cloudy", "mostly_cloudy", "overcast")
 WEATHER_ICON_SVG = {
     kind: _weather_icon_svg(kind)
-    for kind in ("sunny", "mostly_sunny", "partly_cloudy", "mostly_cloudy", "overcast", "showers", "rain", "storm")
+    for kind in (*_CLOUD_BAND_KINDS, *(f"{k}_showers" for k in _CLOUD_BAND_KINDS), "rain", "storm")
 }
 
 
@@ -487,15 +508,19 @@ var WX_SHOWERS_MM = {_ICON_SHOWERS_MM};
 var WX_RAIN_MM = {_ICON_RAIN_MM};
 var WX_HEAVY_RAIN_MM = {_ICON_HEAVY_RAIN_MM};
 var WX_CLOUD_BANDS = {json.dumps(_CLOUD_BANDS)};
-window.__weatherCondition = function (cloudCover, precip) {{
-  if (precip !== null && precip !== undefined && precip >= WX_HEAVY_RAIN_MM) return ["storm", "Heavy rain"];
-  if (precip !== null && precip !== undefined && precip >= WX_RAIN_MM) return ["rain", "Rain"];
-  if (precip !== null && precip !== undefined && precip >= WX_SHOWERS_MM) return ["showers", "Showers"];
+function wxCloudBand(cloudCover) {{
   if (cloudCover === null || cloudCover === undefined) return ["partly_cloudy", "Partly cloudy"];
   for (var i = 0; i < WX_CLOUD_BANDS.length; i++) {{
     if (cloudCover <= WX_CLOUD_BANDS[i][0]) return [WX_CLOUD_BANDS[i][1], WX_CLOUD_BANDS[i][2]];
   }}
   return ["overcast", "Overcast"];
+}}
+window.__weatherCondition = function (cloudCover, precip) {{
+  if (precip !== null && precip !== undefined && precip >= WX_HEAVY_RAIN_MM) return ["storm", "Heavy rain"];
+  if (precip !== null && precip !== undefined && precip >= WX_RAIN_MM) return ["rain", "Rain"];
+  var band = wxCloudBand(cloudCover);
+  if (precip !== null && precip !== undefined && precip >= WX_SHOWERS_MM) return [band[0] + "_showers", band[1] + ", showers"];
+  return band;
 }};
 function updateRecentForecast(loc) {{
   var section = document.getElementById("recent-forecast-section");
@@ -1183,7 +1208,12 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
 .wx-glance[data-wx-kind="partly_cloudy"] { background: linear-gradient(135deg, var(--wx-partly_cloudy-a), var(--wx-partly_cloudy-b)); }
 .wx-glance[data-wx-kind="mostly_cloudy"] { background: linear-gradient(135deg, var(--wx-mostly_cloudy-a), var(--wx-mostly_cloudy-b)); }
 .wx-glance[data-wx-kind="overcast"] { background: linear-gradient(135deg, var(--wx-overcast-a), var(--wx-overcast-b)); }
-.wx-glance[data-wx-kind="showers"] { background: linear-gradient(135deg, var(--wx-showers-a), var(--wx-showers-b)); }
+/* Showers keeps whichever sun/cloud icon the cloud-cover band already
+   picked (see weather_condition) - "<band>_showers" is 1 of 5 kinds, not
+   its own fixed one - but the card background still reads as "some rain
+   today" regardless of which band, so one $= (ends-with) selector covers
+   all 5 instead of repeating the same gradient per band. */
+.wx-glance[data-wx-kind$="_showers"] { background: linear-gradient(135deg, var(--wx-showers-a), var(--wx-showers-b)); }
 .wx-glance[data-wx-kind="rain"] { background: linear-gradient(135deg, var(--wx-rain-a), var(--wx-rain-b)); }
 .wx-glance[data-wx-kind="storm"] { background: linear-gradient(135deg, var(--wx-storm-a), var(--wx-storm-b)); }
 .wx-glance-top { display: flex; align-items: center; gap: 14px; }
