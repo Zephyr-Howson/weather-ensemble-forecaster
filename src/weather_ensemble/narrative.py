@@ -14,7 +14,13 @@ from weather_ensemble.service import default_forecast_target_date
 # budget-conscious nightly job, not a cost/quality tradeoff worth spending
 # more on. See narrative.md discussion - user confirmed Haiku explicitly.
 MODEL = "claude-haiku-4-5"
-MAX_OUTPUT_TOKENS = 200
+# 200 was too tight for what the system prompt actually asks for (temp, rain
+# timing/amount, sun/cloud, wind, a clothing tip, AND a day-of-week-aware
+# activity/drinks recommendation) - a real incident: 6/30 locations on
+# 2026-09-20 were cut off mid-sentence, the longest already at ~223 tokens
+# and still truncated. 450 gives real headroom over that; the prompt's own
+# "brief" instruction is what keeps length in check day to day, not this cap.
+MAX_OUTPUT_TOKENS = 450
 
 SYSTEM_PROMPT = (
     """
