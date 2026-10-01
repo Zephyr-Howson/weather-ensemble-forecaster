@@ -32,15 +32,15 @@ def _safe_error(exc: Exception) -> str:
     return _QUERY_STRING.sub("?<redacted>", str(exc))
 
 
-def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]:
+def collect_forecasts(db_path: Path, location: Location, target_date: date | None = None) -> list[ForecastRecord]:
     """Collect every configured source's forecast for the same single target
-    date, resolved once here via default_forecast_target_date - not left to
-    each fetcher to compute independently. See sources/__init__.py's
-    ForecastFetcher docstring for the incident (a run delayed 5-12 hours by
-    GitHub's own scheduler, silently skipping days of raw collection) this
-    closes.
+    date (default: default_forecast_target_date) - not left to each fetcher
+    to compute independently. See sources/__init__.py's ForecastFetcher
+    docstring for the incident (a run delayed 5-12 hours by GitHub's own
+    scheduler, silently skipping days of raw collection) this closes.
     """
-    target_date = default_forecast_target_date(db_path, location)
+    if target_date is None:
+        target_date = default_forecast_target_date(db_path, location)
     records: list[ForecastRecord] = []
     for source_name, fetcher in FORECAST_SOURCES.items():
         try:
@@ -53,13 +53,14 @@ def collect_forecasts(db_path: Path, location: Location) -> list[ForecastRecord]
     return records
 
 
-def collect_open_meteo_only(db_path: Path, location: Location) -> list[ForecastRecord]:
+def collect_open_meteo_only(db_path: Path, location: Location, target_date: date | None = None) -> list[ForecastRecord]:
     """Collect only Open-Meteo model outputs, for the same resolved target date.
 
     This is useful for a completely free/no-key workflow and for debugging the
     core model ensemble without optional external APIs.
     """
-    target_date = default_forecast_target_date(db_path, location)
+    if target_date is None:
+        target_date = default_forecast_target_date(db_path, location)
     records: list[ForecastRecord] = []
     for source_name, fetcher in OPEN_METEO_FORECAST_SOURCES.items():
         try:
@@ -100,6 +101,13 @@ def default_forecast_target_date(db_path: Path, location: Location) -> date:
     this date" from downstream steps instead of a silently mislabeled one -
     see catch_up_missed_forecasts for how that gap actually gets backfilled
     so this doesn't just stall on it forever.
+
+    Not stable across a run: blend_forecast writing the ensemble row for the
+    date this returns moves the answer forward a day whenever local midnight
+    has already passed. A multi-step run must resolve this once up front and
+    pass that date to every step - see cli._run_for_location for the
+    2026-09-21..10-01 incident where each step re-resolving it on its own
+    left ML/Best/narratives empty everywhere east of WA.
     """
     live_tomorrow = local_today(location) + timedelta(days=1)
     with db.connect(db_path) as conn:
@@ -194,15 +202,16 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
                 print(f"WARN: historical backfill failed for open_meteo_{model}: {_safe_error(exc)}")
 
 
-def collect_forecast_periods(db_path: Path, location: Location) -> int:
+def collect_forecast_periods(db_path: Path, location: Location, target_date: date | None = None) -> int:
     """Small-slice sub-daily rain: live collection, every Open-Meteo model.
 
     Open-Meteo only (not the other 7 providers) - see ForecastPeriodRecord.
-    Uses the same resolved target date as collect_forecasts (not its own
-    independent "tomorrow"), so a delayed run can't disagree with itself
-    about which date periods belong to.
+    Should be given the same resolved target date as collect_forecasts (not
+    its own independent "tomorrow"), so a delayed run can't disagree with
+    itself about which date periods belong to.
     """
-    target_date = default_forecast_target_date(db_path, location)
+    if target_date is None:
+        target_date = default_forecast_target_date(db_path, location)
     records = []
     for model in OPEN_METEO_MODELS:
         try:

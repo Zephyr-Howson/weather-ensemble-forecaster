@@ -147,3 +147,59 @@ def test_catch_up_missed_forecasts_backfills_and_reconstructs_the_gap(tmp_path, 
     assert calls["backtest"] == 2
     assert calls["backtest_best"] == 2
     assert result["narrated"] == [(today - timedelta(days=2)).isoformat()]
+
+
+def test_run_for_location_every_step_targets_the_same_date_on_a_run_past_local_midnight(tmp_path, monkeypatch):
+    """Reproduces the 2026-09-21..10-01 incident: a run delayed past local
+    midnight, with last night's ensemble row at yesterday, correctly
+    collects and blends *today* - but blend_forecast writing today's row
+    moved default_forecast_target_date on to tomorrow, so every step after it
+    that resolved its own default looked for a date nothing had been
+    collected for. Every step must see the one date resolved for the run.
+
+    Each fake mirrors its real function's own fallback (target_date or the
+    default) so this fails against code that doesn't pass target_date down.
+    """
+    db_path = tmp_path / "weather.db"
+    connect(db_path).close()
+    today = local_today(LOCATION)
+    _insert_ensemble_row(db_path, today - timedelta(days=1))
+
+    seen: dict[str, date] = {}
+
+    def _step(name, result=None):
+        def _fake(db, loc, *_args, target_date=None, **_kwargs):
+            seen[name] = target_date or default_forecast_target_date(db, loc)
+            return result if result is not None else {"forecast_date": seen[name].isoformat()}
+        return _fake
+
+    def _fake_blend(db, loc, window, target_date=None):
+        seen["blend_forecast"] = target_date or default_forecast_target_date(db, loc)
+        _insert_ensemble_row(db, seen["blend_forecast"])  # what moves the default on
+        return {"forecast_date": seen["blend_forecast"].isoformat()}
+
+    monkeypatch.setattr(cli, "_catch_up_missed_forecasts", lambda *_a: {"missing_dates": []})
+    monkeypatch.setattr(cli, "collect_forecasts", _step("collect_forecasts", result=[]))
+    monkeypatch.setattr(cli, "blend_forecast", _fake_blend)
+    monkeypatch.setattr(cli, "predict_latest_ml", _step("predict_latest_ml"))
+    monkeypatch.setattr(cli, "collect_forecast_periods", _step("collect_forecast_periods", result=0))
+    monkeypatch.setattr(cli, "blend_forecast_period", _step("blend_forecast_period"))
+    monkeypatch.setattr(cli, "predict_latest_ml_period", _step("predict_latest_ml_period"))
+    monkeypatch.setattr(cli, "predict_best", _step("predict_best"))
+    monkeypatch.setattr(cli, "generate_and_store_best_narrative", _step("generate_and_store_best_narrative"))
+    for name in ("record_actual", "record_actual_periods", "train_models", "train_period_model", "reconcile_period_predictions"):
+        monkeypatch.setattr(cli, name, lambda *_a, **_k: {})
+
+    # The same flags daily-collect.yml runs with.
+    args = cli.build_parser().parse_args([
+        "--db", str(db_path), "--all", "--window", "30", "--train", "--train-window", "90",
+        "--predict-ml", "--predict-best", "--narrate-best", "--collect-periods", "--record-actual-periods",
+        "--forecast-periods", "--train-periods", "--predict-ml-periods",
+    ])
+    assert cli._run_for_location(args, LOCATION) is True
+
+    assert set(seen) == {
+        "collect_forecasts", "blend_forecast", "predict_latest_ml", "collect_forecast_periods",
+        "blend_forecast_period", "predict_latest_ml_period", "predict_best", "generate_and_store_best_narrative",
+    }
+    assert seen == dict.fromkeys(seen, today)

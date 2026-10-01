@@ -41,10 +41,11 @@ than one provider having a bad night).
 Every source implements `fetch_forecast(location, target_date) -> ForecastRecord`
 (this project has no same-day or multi-day-ahead forecasting — everything is
 a 1-day-ahead prediction). `target_date` is resolved exactly once per
-location by `collect_forecasts` (via `default_forecast_target_date`, the same
-gap-aware "expected next date, capped at wall-clock tomorrow" logic the
-Weighted/ML/Best layer already used) and passed to every source - not
-recomputed independently inside each fetcher. A source that can't find data
+location per run by `cli._run_for_location` (via `default_forecast_target_date`,
+gap-aware "expected next date, capped at wall-clock tomorrow" logic) and
+passed to every step - collection (and from there every source), the
+Weighted blend, ML, Best, the narrative and all the sub-daily period steps -
+not recomputed independently inside each fetcher or step. A source that can't find data
 for that exact date in its response raises, rather than silently substituting
 a different one; this is what protects raw collection from a GitHub Actions
 scheduled run that starts hours late (a real, ongoing incident - see

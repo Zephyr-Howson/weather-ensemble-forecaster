@@ -17,7 +17,8 @@ from weather_ensemble.sources import (
 )
 
 # Every fetcher takes the exact calendar date it must return a forecast for -
-# resolved once per location by the caller (see service.collect_forecasts),
+# resolved once per location per run by the caller (see
+# cli._run_for_location and service.collect_forecasts),
 # not recomputed independently inside each fetcher. Before this, every
 # fetcher computed "tomorrow" itself (via local_today(location) or each
 # provider's own server-side date), with no protection against a delayed run

@@ -66,7 +66,10 @@ def test_run_for_location_survives_one_failed_step_and_still_runs_the_rest(monke
     systemic failure could go unnoticed."""
     monkeypatch.setattr(cli, "record_actual", lambda db, location: (_ for _ in ()).throw(RuntimeError("network blip")))
     forecast_calls = []
-    monkeypatch.setattr(cli, "blend_forecast", lambda db, location, window: forecast_calls.append(location.name) or {"ok": True})
+    monkeypatch.setattr(cli, "default_forecast_target_date", lambda db, location: None)
+    monkeypatch.setattr(
+        cli, "blend_forecast", lambda db, location, window, target_date: forecast_calls.append(location.name) or {"ok": True}
+    )
 
     args = _base_args(record_actual=True, forecast=True)
     ok = cli._run_for_location(args, LOCATION)

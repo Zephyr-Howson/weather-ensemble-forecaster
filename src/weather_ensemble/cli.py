@@ -4,6 +4,7 @@ import argparse
 import json
 import re
 import sys
+from functools import cache
 from pathlib import Path
 
 import pandas as pd
@@ -50,6 +51,7 @@ from weather_ensemble.service import (
     collect_forecast_periods,
     collect_forecasts,
     collect_open_meteo_only,
+    default_forecast_target_date,
     export_modelling_table,
     missing_ensemble_dates,
     reconcile_period_predictions,
@@ -367,6 +369,22 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
             _print_json(result)
         ok &= _guarded(location, "catch_up_missed_forecasts", _catch_up)
 
+    # The date every forward-looking step below works on, resolved once per
+    # location per run (lazily, so it's only queried if one of those steps
+    # actually runs - always after catch-up above, and before --forecast
+    # writes anything) and passed to each step explicitly. A real incident:
+    # each step used to fall back on its own default_forecast_target_date,
+    # which is "one past the latest ensemble row, capped at local tomorrow" -
+    # so the moment --forecast wrote that row, every later step re-resolved
+    # to the day after. On an on-time evening run the cap hid this; but
+    # GitHub's scheduler has been starting this ~6.5 hours late, past local
+    # midnight everywhere east of WA, and from 2026-09-21 --predict-ml,
+    # --predict-best, --narrate-best and every period step there looked for
+    # a date nothing had been collected for yet. 207 of 330 location-days up
+    # to 2026-10-01 got no ML, Best or narrative - only Perth/Broome/
+    # Margaret River (whose midnight comes 2-3 hours later) were unaffected.
+    target_date = cache(lambda: default_forecast_target_date(args.db, location))
+
     if args.backfill:
         def _backfill():
             backfill(args.db, location, args.backfill)
@@ -375,13 +393,13 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
 
     if args.collect_open_meteo:
         def _collect_open_meteo():
-            records = collect_open_meteo_only(args.db, location)
+            records = collect_open_meteo_only(args.db, location, target_date=target_date())
             print(f"Collected {len(records)} Open-Meteo model forecast records")
         ok &= _guarded(location, "collect_open_meteo", _collect_open_meteo)
 
     if args.collect or args.all:
         def _collect():
-            records = collect_forecasts(args.db, location)
+            records = collect_forecasts(args.db, location, target_date=target_date())
             print(f"Collected {len(records)} forecast records")
         ok &= _guarded(location, "collect", _collect)
 
@@ -393,7 +411,7 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
 
     if args.forecast or args.all:
         def _forecast():
-            result = blend_forecast(args.db, location, args.window)
+            result = blend_forecast(args.db, location, args.window, target_date=target_date())
             _print_json(result)
         ok &= _guarded(location, "blend_forecast", _forecast)
 
@@ -414,7 +432,7 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
 
     if args.predict_ml:
         def _predict_ml():
-            result = predict_latest_ml(args.db, location, model_dir)
+            result = predict_latest_ml(args.db, location, model_dir, target_date=target_date())
             _print_json(result)
         ok &= _guarded(location, "predict_ml", _predict_ml)
 
@@ -428,7 +446,7 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
 
     if args.collect_periods:
         def _collect_periods():
-            n = collect_forecast_periods(args.db, location)
+            n = collect_forecast_periods(args.db, location, target_date=target_date())
             print(f"Collected {n} sub-daily rain forecast rows")
         ok &= _guarded(location, "collect_periods", _collect_periods)
 
@@ -442,7 +460,7 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         forecast_dates: set[str] = set()
         for period in PERIODS:
             def _forecast_period(period=period):
-                result = blend_forecast_period(args.db, location, period, args.window)
+                result = blend_forecast_period(args.db, location, period, args.window, target_date=target_date())
                 _print_json(result)
                 if "forecast_date" in result:
                     forecast_dates.add(result["forecast_date"])
@@ -462,7 +480,7 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         forecast_dates = set()
         for period in PERIODS:
             def _predict_ml_period(period=period):
-                result = predict_latest_ml_period(args.db, location, period, model_dir)
+                result = predict_latest_ml_period(args.db, location, period, model_dir, target_date=target_date())
                 _print_json(result)
                 if "forecast_date" in result:
                     forecast_dates.add(result["forecast_date"])
@@ -484,7 +502,9 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         # here before its own periods for today even exist yet, leaving
         # Best's period breakdown blank despite picking an eligible winner.
         def _predict_best():
-            result = predict_best(args.db, location, window_days=args.best_window_days, min_days=args.best_min_days)
+            result = predict_best(
+                args.db, location, window_days=args.best_window_days, min_days=args.best_min_days, target_date=target_date()
+            )
             _print_json(result)
         ok &= _guarded(location, "predict_best", _predict_best)
 
@@ -497,7 +517,7 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         # exception - a bad night for this one small feature should never
         # sink the rest of the run.
         def _narrate_best():
-            result = generate_and_store_best_narrative(args.db, location)
+            result = generate_and_store_best_narrative(args.db, location, target_date=target_date())
             _print_json(result)
         ok &= _guarded(location, "narrate_best", _narrate_best)
 
