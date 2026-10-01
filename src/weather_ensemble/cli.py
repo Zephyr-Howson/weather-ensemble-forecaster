@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     parser.add_argument("--collect", action="store_true", help="Collect forecasts for tomorrow")
     parser.add_argument("--collect-open-meteo", action="store_true", help="Collect only free Open-Meteo model forecasts")
-    parser.add_argument("--record-actual", action="store_true", help="Record yesterday's actual weather")
+    parser.add_argument("--record-actual", action="store_true", help="Record yesterday's actual weather (plus any recent day still missing one)")
     parser.add_argument(
         "--backfill", type=int, metavar="DAYS", help="Backfill forecasts and actuals (daily and sub-daily rain periods)"
     )
@@ -250,7 +250,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--collect-periods", action="store_true", help="[small slice] Collect sub-daily rain forecasts for tomorrow"
     )
     parser.add_argument(
-        "--record-actual-periods", action="store_true", help="[small slice] Record yesterday's sub-daily rain actuals"
+        "--record-actual-periods", action="store_true", help="[small slice] Record yesterday's sub-daily rain actuals (plus any recent gap)"
     )
     parser.add_argument(
         "--forecast-periods",
@@ -405,8 +405,8 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
 
     if args.record_actual or args.all:
         def _record_actual():
-            record_actual(args.db, location)
-            print("Recorded yesterday's actual weather")
+            dates = record_actual(args.db, location)
+            print(f"Recorded actual weather for {', '.join(d.isoformat() for d in dates)}")
         ok &= _guarded(location, "record_actual", _record_actual)
 
     if args.forecast or args.all:
@@ -452,8 +452,8 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
 
     if args.record_actual_periods:
         def _record_actual_periods():
-            record_actual_periods(args.db, location)
-            print("Recorded yesterday's sub-daily rain actuals")
+            dates = record_actual_periods(args.db, location)
+            print(f"Recorded sub-daily rain actuals for {', '.join(d.isoformat() for d in dates)}")
         ok &= _guarded(location, "record_actual_periods", _record_actual_periods)
 
     if args.forecast_periods:

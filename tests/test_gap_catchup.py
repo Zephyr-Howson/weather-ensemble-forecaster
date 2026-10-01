@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date, timedelta
 from functools import partial
 
-from weather_ensemble import cli
+from weather_ensemble import cli, service
 from weather_ensemble.config import Location, local_today
 from weather_ensemble.db import connect
 from weather_ensemble.service import default_forecast_target_date, missing_ensemble_dates
@@ -203,3 +203,64 @@ def test_run_for_location_every_step_targets_the_same_date_on_a_run_past_local_m
         "blend_forecast_period", "predict_latest_ml_period", "predict_best", "generate_and_store_best_narrative",
     }
     assert seen == dict.fromkeys(seen, today)
+
+
+def _insert_actual_row(db_path, actual_date: date) -> None:
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO actuals (source, location_name, lat, lon, actual_date, collected_at, max_temp) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("open_meteo_archive", LOCATION.name, LOCATION.lat, LOCATION.lon, actual_date.isoformat(), "2026-01-01T09:00:00", 18.0),
+        )
+        conn.commit()
+
+
+def _stub_actual_fetch(monkeypatch) -> list[date]:
+    fetched: list[date] = []
+    monkeypatch.setattr(service.open_meteo, "fetch_actual", lambda loc, d: fetched.append(d) or d)
+    monkeypatch.setattr(service.db, "upsert_actual", lambda conn, actual: None)
+    return fetched
+
+
+def test_record_actual_fills_a_day_skipped_by_runs_either_side_of_midnight(tmp_path, monkeypatch):
+    """Reproduces the 2026-09-20/09-26 gaps: one run before local midnight
+    recorded today-4, the next one after it recorded today-2, and today-3
+    was never anyone's "yesterday". Yesterday still comes first."""
+    db_path = tmp_path / "weather.db"
+    connect(db_path).close()
+    today = local_today(LOCATION)
+    for i in range(2, 11):
+        if i != 3:
+            _insert_actual_row(db_path, today - timedelta(days=i))
+    fetched = _stub_actual_fetch(monkeypatch)
+
+    recorded = service.record_actual(db_path, LOCATION)
+
+    assert recorded == fetched == [today - timedelta(days=1), today - timedelta(days=3)]
+
+
+def test_record_actual_refetches_yesterday_even_when_already_recorded(tmp_path, monkeypatch):
+    db_path = tmp_path / "weather.db"
+    connect(db_path).close()
+    today = local_today(LOCATION)
+    for i in range(1, 11):
+        _insert_actual_row(db_path, today - timedelta(days=i))
+    fetched = _stub_actual_fetch(monkeypatch)
+
+    assert service.record_actual(db_path, LOCATION) == fetched == [today - timedelta(days=1)]
+
+
+def test_record_actual_only_yesterday_for_a_brand_new_location(tmp_path, monkeypatch):
+    db_path = tmp_path / "weather.db"
+    connect(db_path).close()
+    fetched = _stub_actual_fetch(monkeypatch)
+
+    assert service.record_actual(db_path, LOCATION) == fetched == [local_today(LOCATION) - timedelta(days=1)]
+
+
+def test_record_actual_explicit_target_date_records_only_that_date(tmp_path, monkeypatch):
+    db_path = tmp_path / "weather.db"
+    connect(db_path).close()
+    fetched = _stub_actual_fetch(monkeypatch)
+
+    assert service.record_actual(db_path, LOCATION, target_date=date(2026, 9, 20)) == fetched == [date(2026, 9, 20)]

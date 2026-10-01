@@ -155,12 +155,51 @@ def missing_ensemble_dates(db_path: Path, location: Location) -> list[date]:
     return [d for d in (window_start + timedelta(days=i) for i in range(CATCH_UP_LOOKBACK_DAYS)) if d not in existing]
 
 
-def record_actual(db_path: Path, location: Location, target_date: date | None = None) -> None:
-    if target_date is None:
-        target_date = local_today(location) - timedelta(days=1)
-    actual = open_meteo.fetch_actual(location, target_date)
-    with db.connect(db_path) as conn:
-        db.upsert_actual(conn, actual)
+def actual_dates_to_record(conn, table: str, location: Location) -> list[date]:
+    """Yesterday, then any other day in the trailing CATCH_UP_LOOKBACK_DAYS
+    with no row in `table` (actuals or actual_periods) for this location yet.
+
+    Yesterday by wall clock used to be the whole rule, which skips a day
+    whenever consecutive runs land on opposite sides of local midnight - and
+    GitHub's scheduler has been starting the daily run ~6.5 hours late, right
+    around it (see default_forecast_target_date): 23:30 on the 25th records
+    the 24th, 00:30 on the 27th records the 26th, and the 25th never gets an
+    actual at all. 2026-09-20 ended up with actuals for 4 of 30 locations,
+    2026-09-26 for 9. Yesterday always comes first and is always re-fetched,
+    exactly as before; a location with no rows at all gets just yesterday,
+    matching missing_ensemble_dates, rather than a lookback-sized backfill.
+    """
+    today = local_today(location)
+    yesterday = today - timedelta(days=1)
+    has_any_history = (
+        conn.execute(f"SELECT 1 FROM {table} WHERE location_name = ? LIMIT 1", (location.name,)).fetchone() is not None
+    )
+    if not has_any_history:
+        return [yesterday]
+    window_start = today - timedelta(days=CATCH_UP_LOOKBACK_DAYS)
+    rows = conn.execute(
+        f"SELECT DISTINCT actual_date FROM {table} WHERE location_name = ? AND actual_date >= ? AND actual_date < ?",
+        (location.name, window_start.isoformat(), today.isoformat()),
+    ).fetchall()
+    existing = {date.fromisoformat(r[0]) for r in rows}
+    gaps = [d for d in (window_start + timedelta(days=i) for i in range(CATCH_UP_LOOKBACK_DAYS)) if d not in existing]
+    return [yesterday, *(d for d in gaps if d != yesterday)]
+
+
+def record_actual(db_path: Path, location: Location, target_date: date | None = None) -> list[date]:
+    """Record target_date's observed weather (default: yesterday's, plus any
+    recent day still missing one - see actual_dates_to_record). Returns the
+    dates recorded."""
+    if target_date is not None:
+        dates = [target_date]
+    else:
+        with db.connect(db_path) as conn:
+            dates = actual_dates_to_record(conn, "actuals", location)
+    for d in dates:
+        actual = open_meteo.fetch_actual(location, d)
+        with db.connect(db_path) as conn:
+            db.upsert_actual(conn, actual)
+    return dates
 
 
 def backfill(db_path: Path, location: Location, days_back: int) -> None:
@@ -223,13 +262,20 @@ def collect_forecast_periods(db_path: Path, location: Location, target_date: dat
         return db.insert_forecast_periods(conn, records)
 
 
-def record_actual_periods(db_path: Path, location: Location, target_date: date | None = None) -> None:
-    if target_date is None:
-        target_date = local_today(location) - timedelta(days=1)
-    records = open_meteo.fetch_actual_periods(location, target_date)
-    with db.connect_periods(get_periods_db_path(db_path)) as conn:
-        for r in records:
-            db.upsert_actual_period(conn, r)
+def record_actual_periods(db_path: Path, location: Location, target_date: date | None = None) -> list[date]:
+    """Mirrors record_actual, for sub-daily rain actuals."""
+    periods_db_path = get_periods_db_path(db_path)
+    if target_date is not None:
+        dates = [target_date]
+    else:
+        with db.connect_periods(periods_db_path) as conn:
+            dates = actual_dates_to_record(conn, "actual_periods", location)
+    for d in dates:
+        records = open_meteo.fetch_actual_periods(location, d)
+        with db.connect_periods(periods_db_path) as conn:
+            for r in records:
+                db.upsert_actual_period(conn, r)
+    return dates
 
 
 def load_modelling_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:

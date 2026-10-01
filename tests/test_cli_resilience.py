@@ -80,6 +80,6 @@ def test_run_for_location_survives_one_failed_step_and_still_runs_the_rest(monke
 
 
 def test_run_for_location_returns_true_when_every_step_succeeds(monkeypatch):
-    monkeypatch.setattr(cli, "record_actual", lambda db, location: None)
+    monkeypatch.setattr(cli, "record_actual", lambda db, location: [])
     args = _base_args(record_actual=True)
     assert cli._run_for_location(args, LOCATION) is True
