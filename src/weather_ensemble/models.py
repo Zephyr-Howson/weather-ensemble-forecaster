@@ -49,17 +49,16 @@ class ActualRecord:
 
     @property
     def rain_probability(self) -> None:
-        """Deprecated compatibility shim.
+        """Always None: observations have no rain probability.
 
-        Observed rain probability is intentionally not stored anymore. Use
-        did_rain and precipitation_sum for verification and model targets.
+        Use did_rain and precipitation_sum for verification and model targets.
         """
         return None
 
 
 @dataclass(frozen=True)
 class ForecastPeriodRecord:
-    """One source's sub-daily (morning/afternoon/evening) rain forecast.
+    """One source's rain forecast for one sub-daily period (see config.PERIOD_HOURS).
 
     Deliberately narrower than ForecastRecord - period breakdowns only exist
     for precipitation, not every daily field.

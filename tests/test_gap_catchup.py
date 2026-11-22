@@ -43,11 +43,10 @@ def test_default_forecast_target_date_matches_wall_clock_tomorrow_when_on_schedu
 
 
 def test_default_forecast_target_date_caps_at_the_gap_instead_of_skipping_ahead(tmp_path):
-    """Reproduces the 2026-08-27 incident: the last real ensemble prediction
-    is "yesterday" (the previous run never advanced past it, e.g. because a
-    delayed run's collection landed on the wrong wall-clock date), so the
-    correct next date is "today" - not wall-clock "tomorrow", which would
-    silently skip today's date the way the real incident skipped 2026-08-28.
+    """When the latest ensemble prediction is for yesterday (the pipeline is a
+    day behind, e.g. after a run delayed past local midnight), the next target
+    date is today - never wall-clock tomorrow, which would silently skip
+    today's date.
     """
     db_path = tmp_path / "weather.db"
     connect(db_path).close()
@@ -150,15 +149,14 @@ def test_catch_up_missed_forecasts_backfills_and_reconstructs_the_gap(tmp_path, 
 
 
 def test_run_for_location_every_step_targets_the_same_date_on_a_run_past_local_midnight(tmp_path, monkeypatch):
-    """Reproduces the 2026-09-21..10-01 incident: a run delayed past local
-    midnight, with last night's ensemble row at yesterday, correctly
-    collects and blends *today* - but blend_forecast writing today's row
-    moved default_forecast_target_date on to tomorrow, so every step after it
-    that resolved its own default looked for a date nothing had been
-    collected for. Every step must see the one date resolved for the run.
+    """A run that starts after local midnight, with the latest ensemble row at
+    yesterday, targets today. blend_forecast writing today's row moves
+    default_forecast_target_date on to tomorrow, so _run_for_location resolves
+    the date once and passes it to every step: collection, blend, ML, periods,
+    Best and the narrative all use the same date.
 
     Each fake mirrors its real function's own fallback (target_date or the
-    default) so this fails against code that doesn't pass target_date down.
+    default) so this fails if any step isn't passed target_date.
     """
     db_path = tmp_path / "weather.db"
     connect(db_path).close()
@@ -190,7 +188,7 @@ def test_run_for_location_every_step_targets_the_same_date_on_a_run_past_local_m
     for name in ("record_actual", "record_actual_periods", "train_models", "train_period_model", "reconcile_period_predictions"):
         monkeypatch.setattr(cli, name, lambda *_a, **_k: {})
 
-    # The same flags daily-collect.yml runs with.
+    # The per-location flags daily-collect.yml runs with.
     args = cli.build_parser().parse_args([
         "--db", str(db_path), "--all", "--window", "30", "--train", "--train-window", "90",
         "--predict-ml", "--predict-best", "--narrate-best", "--collect-periods", "--record-actual-periods",
@@ -223,9 +221,10 @@ def _stub_actual_fetch(monkeypatch) -> list[date]:
 
 
 def test_record_actual_fills_a_day_skipped_by_runs_either_side_of_midnight(tmp_path, monkeypatch):
-    """Reproduces the 2026-09-20/09-26 gaps: one run before local midnight
-    recorded today-4, the next one after it recorded today-2, and today-3
-    was never anyone's "yesterday". Yesterday still comes first."""
+    """Consecutive runs either side of local midnight can leave a day that
+    was never any run's "yesterday" (today-3 here). record_actual fetches
+    yesterday first, then any day in the lookback window still missing an
+    actual."""
     db_path = tmp_path / "weather.db"
     connect(db_path).close()
     today = local_today(LOCATION)

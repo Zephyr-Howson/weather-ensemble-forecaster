@@ -215,14 +215,13 @@ def _forecast_precip_and_rain(
 
 
 def test_predict_best_precipitation_excludes_non_period_aware_candidates(tmp_path):
-    """A non-period-aware source (BOM here - see PERIOD_AWARE_CANDIDATES in
-    best.py) must never win Best's precipitation_sum selection even with a
-    far better MAE than every period-aware candidate, since Best's period
-    breakdown can only ever be copied from a period-aware winner (see
-    _period_values_for_model - no other provider ever collects sub-daily rain
-    data at all). The same source is still free to win an unrelated target
+    """A non-period-aware source (bom here - see PERIOD_AWARE_CANDIDATES in
+    best.py) never wins Best's precipitation_sum selection, even with a far
+    better MAE than every period-aware candidate, because Best copies its
+    period breakdown from the precipitation winner and only period-aware
+    candidates have one. The same source can still win an unrelated target
     (max_temp here) on its own merits - the restriction only scopes
-    precipitation_sum/did_rain, not the source everywhere.
+    precipitation_sum/did_rain.
     """
     db_path = tmp_path / "weather.db"
     start = date(2026, 6, 1)
@@ -255,10 +254,9 @@ def test_predict_best_precipitation_excludes_non_period_aware_candidates(tmp_pat
             insert_forecasts(
                 conn,
                 [
-                    # bom: near-perfect precipitation, but a poor max_temp forecast.
+                    # bom: near-perfect on both precipitation and max_temp.
                     forecast(non_period_source, day, 20.1, 2.01),
-                    # the only period-aware candidate: worse precipitation MAE,
-                    # but a near-perfect max_temp forecast.
+                    # the only period-aware candidate: worse on both.
                     forecast(SOURCE_NOISY, day, 30.0, 4.0),
                 ],
             )
@@ -327,10 +325,10 @@ def test_predict_best_did_rain_copied_from_precipitation_winner(tmp_path):
 
 
 def test_backtest_best_predictions_walk_forward(tmp_path):
-    """Mirrors test_backtest_predictions_writes_ensemble_and_ml_rows: seed
-    history plus one more day with only forecasts (no actual, no existing
-    best row) and confirm the walk-forward backcast writes a row for it,
-    again drawing from the historically-accurate source.
+    """Mirrors test_backtest_predictions_writes_ensemble_and_ml_rows: seed 21
+    scored days with no best_predictions rows and confirm the walk-forward
+    backcast of the most recent day writes one row, copying the historically
+    accurate source's own value for that day.
     """
     db_path = tmp_path / "weather.db"
     start = date(2026, 6, 1)
@@ -470,14 +468,12 @@ def test_predict_best_period_precipitation_inherits_daily_winner(tmp_path):
 
 
 def test_predict_best_precipitation_falls_through_when_winner_lacks_periods_for_this_date(tmp_path):
-    """A period-aware candidate can still have a one-off gap in its own
-    period collection for this exact date - e.g. a brand-new live-only
-    source whose period tracking came online a day after its daily forecasts
-    did (confirmed in practice for open_meteo_best_match). Best must skip it
-    in favor of the next-ranked period-aware candidate that actually has
-    period data for this date, even though the skipped candidate has the
-    better standalone precipitation MAE - a complete winner beats a more
-    "accurate" one that would leave every period blank.
+    """A period-aware candidate can have a daily forecast but no period rows
+    for this exact date (e.g. a source whose period collection starts later
+    than its daily collection). Best skips it in favor of the next-ranked
+    period-aware candidate that has period data for this date, even though
+    the skipped candidate has the better precipitation MAE - a complete
+    winner beats a more "accurate" one that would leave every period blank.
     """
     db_path = tmp_path / "weather.db"
     start = date(2026, 6, 1)
@@ -505,8 +501,7 @@ def test_predict_best_precipitation_falls_through_when_winner_lacks_periods_for_
             ],
         )
 
-    # Only has_periods_today gets period rows seeded for tomorrow - simulates
-    # no_periods_today's period collection not having started yet for this date.
+    # Only has_periods_today gets period rows for tomorrow.
     complete_periods = dict(zip(PERIODS, [0.5, 1.0, 1.0, 0.5], strict=True))
     with connect_periods(get_periods_db_path(db_path)) as pconn:
         for period, value in complete_periods.items():
@@ -527,11 +522,9 @@ def test_predict_best_precipitation_falls_through_when_winner_lacks_periods_for_
 
 
 def test_predict_best_precipitation_falls_back_to_value_only_when_no_candidate_has_periods(tmp_path):
-    """If literally no period-aware candidate has period data for this exact
-    date, Best must still report its best available precipitation_sum/
-    did_rain figure rather than losing the day's prediction entirely - the
-    same graceful-degradation guarantee every other target already gets.
-    Periods are left blank in this genuine last-resort case.
+    """If no period-aware candidate has period data for this date, Best still
+    reports its best available precipitation_sum/did_rain figure rather than
+    losing the day's prediction, and leaves the periods blank.
     """
     db_path = tmp_path / "weather.db"
     start = date(2026, 6, 1)

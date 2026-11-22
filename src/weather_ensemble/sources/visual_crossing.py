@@ -30,9 +30,12 @@ def _mean(items: list[dict], key: str) -> float | None:
 def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
     """Fetch target_date's forecast from Visual Crossing Timeline API.
 
-    Requires VISUAL_CROSSING_KEY in your .env. This collector is live-forecast
-    only in this project; historical forecast archive access varies by Visual
-    Crossing account/endpoint, so Open-Meteo remains the default backfill source.
+    Requires VISUAL_CROSSING_KEY in your .env. Requests just target_date (metric,
+    days + hours). Gust, cloud, humidity and pressure come from the day values,
+    falling back to the hourly max/mean when the day value is missing.
+
+    Live-only: historical forecast archive access varies by Visual Crossing
+    account/endpoint, so backfill uses Open-Meteo.
     """
     api_key = os.getenv("VISUAL_CROSSING_KEY")
     if not api_key:

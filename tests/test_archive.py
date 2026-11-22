@@ -95,8 +95,8 @@ def test_export_blob_backlog_covers_ensemble_metadata_and_period_tables(tmp_path
 def test_archive_old_forecasts_removes_only_rows_past_the_cutoff(tmp_path):
     db_path = tmp_path / "weather.db"
     with connect(db_path) as conn:
-        _insert_forecast(conn, "2025-01-01", "2024-12-31T21:00:00", max_temp=15.0)  # ~200 days before test's "now"
-        _insert_forecast(conn, "2026-07-20", "2026-07-19T21:00:00", max_temp=22.0)  # recent
+        _insert_forecast(conn, "2025-01-01", "2024-12-31T21:00:00", max_temp=15.0)  # past the 180-day cutoff
+        _insert_forecast(conn, "2026-07-20", "2026-07-19T21:00:00", max_temp=22.0)  # within it
         conn.commit()
 
     report = archive_old_forecasts(db_path, cutoff_days=180)

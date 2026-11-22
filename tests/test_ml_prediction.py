@@ -93,11 +93,10 @@ def test_build_prediction_feature_table_honors_explicit_target_date(tmp_path):
 
 def test_missing_source_is_filled_from_this_rows_own_median_not_left_nan(tmp_path):
     """A source missing on one specific day (a collection gap, a provider
-    outage) should have its slot filled from what the OTHER sources are
-    saying that same day, not a stale column-wide historical median - see
-    _build_wide_feature_table's fallback fill. This is what stopped Ridge
-    from extrapolating a 467.9% cloud cover prediction on a day several
-    sources genuinely had a gap.
+    outage) has its slot filled from what the OTHER sources are saying that
+    same day, not a stale column-wide historical median - see
+    _build_wide_feature_table's fallback fill. A stale substitute can push
+    Ridge to physically impossible predictions (e.g. 467.9% cloud cover).
 
     Uses build_feature_table (the multi-day, actual-joined table backtest.py
     also builds its wide_all from) rather than build_prediction_feature_table
@@ -229,7 +228,7 @@ def test_fill_missing_sources_from_row_median_covers_a_source_absent_from_the_wh
     # that's how it tells a genuine per-source column apart from an aggregate
     # stat column like "source_mean__cloud_cover".
     raw = pd.DataFrame({"weatherbit__cloud_cover": [80.0], "wttr_in__cloud_cover": [84.0]})
-    # Simulate reindexing to a model trained when bom was still active.
+    # Reindex to a model whose features include a source (bom) absent today.
     X = raw.reindex(columns=["weatherbit__cloud_cover", "wttr_in__cloud_cover", "bom__cloud_cover"])
     assert X["bom__cloud_cover"].isna().all()
 
@@ -241,9 +240,8 @@ def test_fill_missing_sources_from_row_median_covers_a_source_absent_from_the_wh
 
 
 def test_clip_prediction_caps_percentage_targets_at_100():
-    """A real incident: a missing feature let Ridge extrapolate to 467.9%
-    predicted cloud cover for one location on one day - percentages can't
-    physically exceed 100."""
+    """Percentages can't physically exceed 100, so an extrapolated Ridge
+    prediction (e.g. 467.9% cloud cover) is capped there."""
     assert clip_prediction("cloud_cover", 467.9) == 100.0
     assert clip_prediction("humidity", 109.3) == 100.0
     assert clip_prediction("cloud_cover", 50.0) == 50.0  # in-range values pass through
@@ -254,11 +252,10 @@ def test_clip_prediction_does_not_cap_targets_with_no_ceiling():
 
 
 def test_clip_prediction_caps_precipitation_at_500mm():
-    """A real incident: a handful of high-leverage heavy-rain training days let
-    raw-scale Ridge extrapolate to an 11,751mm prediction on real production
-    data - far beyond Australia's official 24h rainfall record (~907mm,
-    Crohamhurst 1893). 500mm is a physically-motivated ceiling, not a
-    percentage one."""
+    """A few high-leverage heavy-rain training days can push raw-scale Ridge
+    to absurd totals (e.g. 11,751mm), far beyond Australia's official 24h
+    rainfall record (~907mm, Crohamhurst 1893). 500mm is a
+    physically-motivated ceiling, not a percentage one."""
     assert clip_prediction("precipitation_sum", 11751.67) == 500.0
     assert clip_prediction("precipitation_sum", 200.0) == 200.0  # in-range values pass through
 
@@ -311,12 +308,10 @@ def test_predict_latest_ml_clips_negative_precipitation_to_zero(tmp_path):
 
 
 def test_make_model_uses_plain_ridge_for_precipitation():
-    """A log1p/expm1 target transform was tried here to tame Ridge's raw-mm
-    extrapolation on precipitation_sum's skewed, zero-inflated distribution.
-    It backfired: expm1 is exponential, so a merely-moderate log-space
-    overshoot (easy to produce with production's many correlated features)
-    exploded on inversion, and even with the 500mm ceiling in place it
-    dragged backtest MAE from 1.13mm to 6.29mm. Reverted to plain Ridge."""
+    """precipitation_sum is fitted with plain Ridge, without a log1p/expm1
+    target transform: expm1 turns a moderate log-space overshoot into a huge
+    one on inversion, and in backtests the transform raised MAE from 1.13mm
+    to 6.29mm even with the 500mm ceiling."""
     model_type, pipeline = _make_model("precipitation_sum")
     assert model_type == "regression"
     assert isinstance(pipeline.named_steps["model"], Ridge)

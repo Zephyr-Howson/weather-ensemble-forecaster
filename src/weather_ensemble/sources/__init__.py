@@ -16,26 +16,18 @@ from weather_ensemble.sources import (
     wttr,
 )
 
-# Every fetcher takes the exact calendar date it must return a forecast for -
-# resolved once per location per run by the caller (see
-# cli._run_for_location and service.collect_forecasts),
-# not recomputed independently inside each fetcher. Before this, every
-# fetcher computed "tomorrow" itself (via local_today(location) or each
-# provider's own server-side date), with no protection against a delayed run
-# - unlike the ensemble/ML/Best layer (see default_forecast_target_date),
-# which already guards against exactly this. A real incident: GitHub's
-# scheduled trigger for the daily collection workflow ran 5-12 hours late
-# every day from 2026-08-27 onward, late enough that many locations' fetches
-# executed past their own local midnight, silently shifting "tomorrow" a full
-# day ahead and leaving the intended date's row missing forever for every
-# source with no historical-backfill path. Threading one already-resolved
-# date through every fetcher closes that gap: a fetcher that can't find data
-# for the requested date now raises (caught by collect_forecasts's existing
-# per-source try/except) instead of silently substituting a different date.
+# Every fetcher takes the exact calendar date (location-local) it must return a
+# forecast for. The caller resolves that date once per location per run (see
+# cli._run_for_location and service.default_forecast_target_date); fetchers never
+# work out "tomorrow" themselves, so a run that starts late enough to cross local
+# midnight can't silently collect the wrong day. A fetcher whose response has no
+# entry for the requested date raises, and service.collect_forecasts logs the
+# failure and carries on with the other sources.
 ForecastFetcher = Callable[[Location, date], ForecastRecord]
 
-# Core free ensemble: multiple Open-Meteo model outputs. These are the most
-# important sources because they can be both collected live and backfilled.
+# Core free ensemble: one source per Open-Meteo model. These matter most because
+# they can be collected live and (except best_match) backfilled from Open-Meteo's
+# historical-forecast archive - see config.OPEN_METEO_BACKFILL_MODELS.
 OPEN_METEO_FORECAST_SOURCES: dict[str, ForecastFetcher] = {
     f"open_meteo_{model}": (
         lambda location, target_date, model=model: open_meteo.fetch_forecast_with_periods(
@@ -45,8 +37,9 @@ OPEN_METEO_FORECAST_SOURCES: dict[str, ForecastFetcher] = {
     for model in OPEN_METEO_MODELS
 }
 
-# Optional live-only providers. These enrich forecasts going forward if API keys
-# are configured, but the service layer will skip them cleanly on failures.
+# Live-only providers (no archived forecasts to backfill from). Keyed ones raise
+# when their API key is unset; service.collect_forecasts logs any failure and
+# skips that source for the run.
 OPTIONAL_FORECAST_SOURCES: dict[str, ForecastFetcher] = {
     "wttr_in": wttr.fetch_forecast,
     "weatherapi": weatherapi.fetch_forecast,

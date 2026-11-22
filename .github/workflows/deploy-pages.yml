@@ -1,20 +1,14 @@
 name: Deploy accuracy report to Pages
 
-# Two triggers, because a single one can't cover both cases:
+# Publishes reports/accuracy_report.html as the Pages site's index.html.
 #
-# - `push` fires for a commit pushed with real user credentials (e.g. a manual
-#   fix pushed outside the nightly run) - but GitHub deliberately does NOT fire
-#   `push` for a commit made with the default GITHUB_TOKEN, to prevent
-#   workflow-triggers-workflow loops. regenerate-report.yml's automated commit
-#   uses exactly that default token, so `push` alone would never catch it.
-# - `workflow_run` fires whenever regenerate-report.yml finishes, regardless
-#   of what token it pushed with - covering the case `push` misses. (Not
-#   daily-collect.yml - that workflow no longer touches the report at all,
-#   only the underlying database; regenerate-report.yml is what actually
-#   produces reports/accuracy_report.html now.)
-#
-# Together, any change to the report - nightly or ad hoc - redeploys Pages
-# within a minute or two, instead of only catching up once a day.
+# - `push` covers a report commit pushed with user credentials (e.g. a manual
+#   local regeneration). GitHub does not fire `push` for commits made with the
+#   default GITHUB_TOKEN, to prevent workflow-triggers-workflow loops, so it
+#   misses regenerate-report.yml's automated commit.
+# - `workflow_run` covers that case: it fires when regenerate-report.yml
+#   completes, and the job runs only if that run succeeded.
+# - `workflow_dispatch` redeploys on demand.
 on:
   push:
     branches: [main]
@@ -44,12 +38,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # A real incident (see regenerate-report.yml's identical comment):
-          # pinning to `github.event.workflow_run.head_sha` does not reliably
-          # get the triggering run's own final commit - a run built from data
-          # that was missing what regenerate-report.yml had already pushed.
-          # Checking out `main` by name always resolves to whatever is
-          # actually on the branch right now, with no such ambiguity.
+          # `main` by name, not `github.event.workflow_run.head_sha`: the
+          # triggering run's head_sha is the commit it started from, not the
+          # report commit it pushed, so it would deploy a stale report.
           ref: main
 
       - name: Prepare Pages site

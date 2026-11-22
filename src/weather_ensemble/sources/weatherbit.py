@@ -24,8 +24,9 @@ def _kmh(value: object) -> float | None:
 def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
     """Fetch target_date's forecast from Weatherbit's 16-day daily forecast endpoint.
 
-    Requires WEATHERBIT_KEY in your .env. This collector is live-forecast only;
-    historical backfill remains Open-Meteo's job.
+    Requires WEATHERBIT_KEY in your .env. Live-only; historical backfill is
+    Open-Meteo's job. weather_code is Weatherbit's own weather code, not a WMO
+    code.
     """
     api_key = os.getenv("WEATHERBIT_KEY")
     if not api_key:
@@ -36,8 +37,8 @@ def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
         "lat": location.lat,
         "lon": location.lon,
         "key": api_key,
-        # One day of buffer beyond the 2 ever actually needed - see
-        # weatherapi.py's identical comment for why.
+        # Today and tomorrow (where a live target date falls) plus a day's
+        # margin; the target is matched by valid_date, not by position.
         "days": 3,
     }
     response = get_with_retry(url, params=params, timeout=TIMEOUT_SECONDS)

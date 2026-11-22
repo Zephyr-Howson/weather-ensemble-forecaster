@@ -9,17 +9,14 @@ from weather_ensemble import db
 from weather_ensemble.config import PERIODS, Location, get_periods_db_path
 from weather_ensemble.service import default_forecast_target_date
 
-# Haiku, not Opus/Sonnet: this writes a 2-3 sentence summary from ~10 numbers,
-# once a night per location - the cheapest tier is the right fit for a
-# budget-conscious nightly job, not a cost/quality tradeoff worth spending
-# more on. See narrative.md discussion - user confirmed Haiku explicitly.
+# Haiku: this writes a short (at most 4-5 sentence) summary from ~10 numbers,
+# once a night per location, so the cheapest tier fits a budget-conscious
+# nightly job.
 MODEL = "claude-haiku-4-5"
-# 200 was too tight for what the system prompt actually asks for (temp, rain
-# timing/amount, sun/cloud, wind, a clothing tip, AND a day-of-week-aware
-# activity/drinks recommendation) - a real incident: 6/30 locations on
-# 2026-09-20 were cut off mid-sentence, the longest already at ~223 tokens
-# and still truncated. 450 gives real headroom over that; the prompt's own
-# "brief" instruction is what keeps length in check day to day, not this cap.
+# Headroom for everything the system prompt can ask for (temperatures, rain
+# timing/amount, sun/cloud, wind, and optional clothing and activity tips) so
+# a reply is never cut off mid-sentence. The prompt's length instruction, not
+# this cap, keeps the summary brief.
 MAX_OUTPUT_TOKENS = 450
 
 SYSTEM_PROMPT = (
@@ -195,15 +192,16 @@ def generate_and_store_best_narrative(
     db_path: Path, location: Location, target_date: date | None = None
 ) -> dict[str, Any]:
     """Generate and persist a brief natural-language narrative for Best's
-    target_date prediction (default: tomorrow) via a single Claude API call.
+    target_date prediction (default: default_forecast_target_date, normally
+    the location's local tomorrow) via a single Claude API call, stored in
+    best_narratives.
 
-    Best never predicts anything itself - see best.py - so this reads
-    whatever Best already picked (the same values report.py's recent-
-    forecasts table shows) rather than recomputing anything. Any failure
-    anywhere in this pipeline (no Best prediction yet, the LLM call failing
-    for any reason) returns a "skipped" result rather than raising - callers
-    should treat this exactly like the existing _guarded per-location steps
-    in cli.py: log and move on, never abort the run.
+    This reads whatever Best already picked (the latest best_predictions row
+    and best_predictions_periods values - the same values report.py's Recent
+    forecasts card shows) rather than recomputing anything. A missing Best
+    prediction or a failed LLM call returns a "skipped" result rather than
+    raising; cli.py runs this inside _guarded like its other per-location
+    steps, so it is logged and the run moves on.
     """
     if target_date is None:
         target_date = default_forecast_target_date(db_path, location)

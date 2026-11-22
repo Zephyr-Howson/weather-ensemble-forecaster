@@ -30,14 +30,14 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
     from BOM's own station network, going back to 1889 - a genuinely independent
     ground-truth source, not a repackaging of the same reanalysis Open-Meteo uses.
 
-    Unlike the other optional providers, this is NOT wired into the default
-    collection pipeline (service.record_actual/backfill): the actuals table
-    allows multiple sources per day, but load_modelling_table's forecast-to-
-    actual join assumes exactly one actuals row per (location, date) - adding a
-    second source there would silently duplicate every forecast row in the
-    join. Call this directly if you want to compare or switch to it
-    deliberately (own testing found Open-Meteo's own actuals more reliable for
-    this project's purposes).
+    Records max/min temperature and rainfall only (the other ActualRecord fields
+    are left None).
+
+    Not called by the pipeline (service.record_actual/backfill use Open-Meteo's
+    archive): the actuals table allows multiple sources per day, but
+    load_modelling_table's forecast-to-actual join assumes one actuals row per
+    (location, date), so storing a second source would duplicate every forecast
+    row in the join. Call this directly to compare against Open-Meteo's actuals.
     """
     email = os.getenv("SILO_EMAIL")
     if not email:

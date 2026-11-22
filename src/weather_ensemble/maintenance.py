@@ -7,14 +7,13 @@ from weather_ensemble import db
 from weather_ensemble.config import get_periods_db_path
 
 # For each table: the columns that identify "the same prediction/observation",
-# and the ORDER BY that ranks duplicates newest-first so ROW_NUMBER() = 1 is
-# the one kept. `forecasts` intentionally does NOT rank by collected_at alone:
-# a live-collected row always outranks a backfilled one for the same
-# (source, location, forecast_date), even if the backfill happened later -
-# this matches the precedence load_modelling_table already uses everywhere
-# else in the app (backfill is a lower-priority historical reconstruction,
-# not "fresher" data). Everything else has no such distinction, so newest
-# generated_at/collected_at wins outright.
+# and the ORDER BY that ranks duplicates so ROW_NUMBER() = 1 is the one kept.
+# `forecasts` does NOT rank by collected_at alone: a live-collected row always
+# outranks a backfilled one for the same (source, location, forecast_date),
+# even if the backfill happened later - the same precedence
+# load_modelling_table uses (backfill is a lower-priority historical
+# reconstruction, not "fresher" data). Every other table keeps the newest
+# generated_at/collected_at.
 _DEDUPE_SPECS = {
     "forecasts": {
         "partition": ["source", "location_name", "forecast_date"],
@@ -38,9 +37,8 @@ _DEDUPE_SPECS = {
     },
 }
 
-# Same idea, one level finer - every period table's identity additionally
-# includes `period`, since a row is "the same prediction/observation" only if
-# it's for the same sub-daily bucket too.
+# Same rules for the period tables (forecast_periods also prefers live rows),
+# with `period` added to every table's identity.
 _PERIOD_DEDUPE_SPECS = {
     "forecast_periods": {
         "partition": ["source", "location_name", "forecast_date", "period"],
@@ -90,8 +88,9 @@ def _dedupe_tables(conn, specs: dict[str, dict[str, Any]]) -> dict[str, Any]:
 
 def deduplicate(db_path: Path) -> dict[str, Any]:
     """Remove duplicate rows (same source/location/date[/period]) across every
-    prediction/observation table in both databases, keeping only the
-    highest-priority one per the rules above.
+    forecast, actual and prediction table in the main and periods databases,
+    keeping only the highest-priority one per the rules above. best_narratives
+    and the report archive are not touched.
 
     Safe to run repeatedly - a table with no duplicates reports 0 removed.
     """

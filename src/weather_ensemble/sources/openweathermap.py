@@ -39,7 +39,8 @@ def _min(values: list[float | None]) -> float | None:
 
 def _local_date_from_timestamp(ts: float, location: Location) -> date:
     """OWM's "dt" is a UTC unix timestamp with no location-local-date equivalent;
-    convert it ourselves rather than using the machine's own timezone."""
+    convert it with the location's timezone rather than the machine's (falls back
+    to the machine's timezone if the zone name is unknown)."""
     try:
         tz = ZoneInfo(location.timezone)
     except ZoneInfoNotFoundError:
@@ -52,10 +53,12 @@ def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
 
     Requires OPENWEATHERMAP_KEY in your .env. Deliberately uses /data/2.5/forecast
     rather than One Call 3.0: 2.5 is included in every free plan with no card
-    required, while One Call 3.0 needs a separate paid "One Call by Call"
-    subscription. The tradeoff is resolution - this endpoint is 3-hourly, so
-    it's aggregated here into one daily summary - and no UV index, which isn't
-    exposed on this endpoint at all.
+    required, while One Call 3.0 needs a separate "One Call by Call"
+    subscription. The endpoint is 3-hourly, so the blocks falling on
+    target_date (location-local) are aggregated into one daily record: max/min
+    temperature, max rain probability, summed rain, max wind speed and gust,
+    and mean cloud, humidity and pressure. weather_code is the middle block's
+    OpenWeatherMap condition id, not a WMO code.
     """
     api_key = os.getenv("OPENWEATHERMAP_KEY")
     if not api_key:

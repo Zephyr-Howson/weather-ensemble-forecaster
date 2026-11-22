@@ -33,11 +33,13 @@ def _safe_error(exc: Exception) -> str:
 
 
 def collect_forecasts(db_path: Path, location: Location, target_date: date | None = None) -> list[ForecastRecord]:
-    """Collect every configured source's forecast for the same single target
-    date (default: default_forecast_target_date) - not left to each fetcher
-    to compute independently. See sources/__init__.py's ForecastFetcher
-    docstring for the incident (a run delayed 5-12 hours by GitHub's own
-    scheduler, silently skipping days of raw collection) this closes.
+    """Collect every configured source's forecast for one target date (default:
+    default_forecast_target_date) and insert them into `forecasts`.
+
+    Every fetcher is given the same already-resolved date rather than working
+    out "tomorrow" itself, so a run that starts after local midnight still
+    collects the date the rest of the run works on. A source that fails is
+    logged and skipped; the others are still stored.
     """
     if target_date is None:
         target_date = default_forecast_target_date(db_path, location)
@@ -73,41 +75,31 @@ def collect_open_meteo_only(db_path: Path, location: Location, target_date: date
     return records
 
 
-# How far back catch_up_missed_forecasts/missing_ensemble_dates will look for a
-# gap. Bounded rather than scanning all history - a location that's been
-# offline/misconfigured for longer than this needs a deliberate --backfill,
-# not an ever-growing walk-forward reconstruction tacked onto every daily run.
+# How far back missing_ensemble_dates (used by cli._catch_up_missed_forecasts)
+# and actual_dates_to_record look for a gap. Bounded rather than scanning all
+# history - a location that's been offline/misconfigured for longer than this
+# needs a deliberate --backfill, not an ever-growing walk-forward
+# reconstruction tacked onto every daily run.
 CATCH_UP_LOOKBACK_DAYS = 10
 
 
 def default_forecast_target_date(db_path: Path, location: Location) -> date:
-    """The date collect/forecast/predict-ml/predict-best/narrate should treat
-    as "tomorrow" today: normally the location's real local tomorrow, but
-    never later than one day past whatever this location's most recent
-    ensemble prediction already covers.
+    """The date the collect/forecast/predict-ml/predict-best/narrate steps
+    treat as "tomorrow": min(local tomorrow, the day after this location's
+    latest ensemble_predictions forecast_date), or local tomorrow if the
+    location has no ensemble prediction yet.
 
-    A run that starts late enough to cross local midnight otherwise computes
-    a "tomorrow" that has silently jumped a full day ahead of where the
-    pipeline actually left off - every one of these call sites used to derive
-    this independently from wall-clock local_today(location) + 1 day, so a
-    delayed run (see the 2026-08-27 incident: collection didn't start until
-    18:53 UTC, ~9 hours late, by which point it was already past midnight in
-    Melbourne) had every step agree on the same wrong, later date rather than
-    erroring - forecast_date 2026-08-28 was never generated at all, and
-    2026-08-29's narrative opened with "Saturday" while the 28th (a Friday)
-    was still the real current day everywhere else. Capping at the real
-    tomorrow (via min()) means a location with no gap behaves exactly as
-    before; a location with a gap gets a clean "no forecast collected yet for
-    this date" from downstream steps instead of a silently mislabeled one -
-    see catch_up_missed_forecasts for how that gap actually gets backfilled
-    so this doesn't just stall on it forever.
+    A run that starts after local midnight (GitHub's scheduled runs can start
+    hours late) would otherwise skip a day: wall-clock tomorrow would already be
+    two days past the last date the pipeline predicted. With the cap, such a
+    run works on the day after the last prediction instead. If that date can't
+    be collected, downstream steps report that no forecast exists for it, and
+    cli._catch_up_missed_forecasts backfills it on a later run.
 
-    Not stable across a run: blend_forecast writing the ensemble row for the
-    date this returns moves the answer forward a day whenever local midnight
-    has already passed. A multi-step run must resolve this once up front and
-    pass that date to every step - see cli._run_for_location for the
-    2026-09-21..10-01 incident where each step re-resolving it on its own
-    left ML/Best/narratives empty everywhere east of WA.
+    Not stable across a run: once blend_forecast writes the ensemble row for
+    the date this returns, the answer moves forward a day whenever local
+    midnight has already passed. A multi-step run resolves it once up front
+    and passes that date to every step (see cli._run_for_location).
     """
     live_tomorrow = local_today(location) + timedelta(days=1)
     with db.connect(db_path) as conn:
@@ -125,10 +117,9 @@ def missing_ensemble_dates(db_path: Path, location: Location) -> list[date]:
     """Every date in the trailing CATCH_UP_LOOKBACK_DAYS (up to, not
     including, today) with no ensemble_predictions row for this location.
 
-    Deliberately scans the whole recent window rather than just checking
-    MAX(forecast_date) + 1 == today: once a delayed run has skipped a day and
-    moved on (see default_forecast_target_date), a later date already exists
-    in the table and would hide the earlier gap from a MAX-based check alone.
+    Scans the whole recent window rather than just checking MAX(forecast_date):
+    a later date can already exist in the table while an earlier one is
+    missing, and a MAX-based check would not see that gap.
 
     Returns [] for a location with no ensemble_predictions history at all -
     a brand-new location's first-ever run has no "gap" to speak of, and
@@ -159,15 +150,13 @@ def actual_dates_to_record(conn, table: str, location: Location) -> list[date]:
     """Yesterday, then any other day in the trailing CATCH_UP_LOOKBACK_DAYS
     with no row in `table` (actuals or actual_periods) for this location yet.
 
-    Yesterday by wall clock used to be the whole rule, which skips a day
-    whenever consecutive runs land on opposite sides of local midnight - and
-    GitHub's scheduler has been starting the daily run ~6.5 hours late, right
-    around it (see default_forecast_target_date): 23:30 on the 25th records
-    the 24th, 00:30 on the 27th records the 26th, and the 25th never gets an
-    actual at all. 2026-09-20 ended up with actuals for 4 of 30 locations,
-    2026-09-26 for 9. Yesterday always comes first and is always re-fetched,
-    exactly as before; a location with no rows at all gets just yesterday,
-    matching missing_ensemble_dates, rather than a lookback-sized backfill.
+    Recording only wall-clock yesterday would skip a day whenever consecutive
+    runs land on opposite sides of local midnight (23:30 on the 25th records
+    the 24th, 00:30 on the 27th records the 26th, and the 25th is never
+    recorded), which happens because GitHub's scheduled runs can start hours
+    late. Yesterday always comes first and is always re-fetched; a location
+    with no rows at all gets just yesterday, like missing_ensemble_dates,
+    rather than a lookback-sized backfill.
     """
     today = local_today(location)
     yesterday = today - timedelta(days=1)
@@ -203,17 +192,17 @@ def record_actual(db_path: Path, location: Location, target_date: date | None = 
 
 
 def backfill(db_path: Path, location: Location, days_back: int) -> None:
-    """Backfill actuals plus all configured Open-Meteo historical forecasts,
-    daily and sub-daily rain periods together.
+    """Backfill the last `days_back` days (local yesterday back to today -
+    days_back) of actuals and Open-Meteo historical forecasts, daily and
+    sub-daily rain periods together.
 
-    Merged into one pass per model (one API call each, via
-    fetch_historical_forecast_with_periods) rather than two separate
-    functions that each independently fetched and derived precipitation -
-    see that function's docstring for why splitting it caused a source's own
-    daily precipitation total to disagree with the sum of its own 4 periods.
-    Open-Meteo is intentionally the backbone here because its Historical
-    Forecast API lets us retrieve archived forecasts rather than just observed
-    weather. Optional providers are live-only and are not backfilled here.
+    Actuals are fetched day by day, then actual periods for the whole range,
+    then each OPEN_METEO_BACKFILL_MODELS model's daily forecasts and periods
+    from a single API call (fetch_historical_forecast_with_periods), so a
+    source's daily precipitation total matches the sum of its own periods.
+    Each fetch is isolated: a failure is logged and the rest continue.
+    Open-Meteo is the only backfilled source because its Historical Forecast
+    API returns archived forecasts; the optional providers are live-only.
     """
     today = local_today(location)
     with db.connect(db_path) as conn, db.connect_periods(get_periods_db_path(db_path)) as period_conn:
@@ -242,12 +231,12 @@ def backfill(db_path: Path, location: Location, days_back: int) -> None:
 
 
 def collect_forecast_periods(db_path: Path, location: Location, target_date: date | None = None) -> int:
-    """Small-slice sub-daily rain: live collection, every Open-Meteo model.
+    """Live sub-daily rain collection from every OPEN_METEO_MODELS model, into
+    forecast_periods. Returns the number of rows inserted.
 
-    Open-Meteo only (not the other 7 providers) - see ForecastPeriodRecord.
-    Should be given the same resolved target date as collect_forecasts (not
-    its own independent "tomorrow"), so a delayed run can't disagree with
-    itself about which date periods belong to.
+    Open-Meteo only (not the 7 optional providers). Callers pass the same
+    resolved target date as collect_forecasts, so the periods belong to the
+    same date as the daily rows.
     """
     if target_date is None:
         target_date = default_forecast_target_date(db_path, location)
@@ -279,6 +268,13 @@ def record_actual_periods(db_path: Path, location: Location, target_date: date |
 
 
 def load_modelling_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:
+    """One row per (source, forecast_date) that has an actual, with every forecast
+    variable alongside its actual_<target> columns.
+
+    Where a source has several forecasts for a date, a live-collected row wins
+    over a backfilled one, then the most recently collected. `window_days`
+    keeps forecast dates within that many days of local today (None: all).
+    """
     cutoff = "0000-01-01"
     if window_days:
         cutoff = (local_today(location) - timedelta(days=window_days)).isoformat()
@@ -349,6 +345,7 @@ def compute_mae_scores(df: pd.DataFrame) -> dict[str, dict[str, float]]:
 
 
 def latest_forecasts_for_date(db_path: Path, location: Location, target_date: date) -> pd.DataFrame:
+    """Each source's most recently collected forecast row for target_date."""
     with db.connect(db_path) as conn:
         return pd.read_sql_query(
             """
@@ -381,7 +378,8 @@ def blend_weighted(forecast_df: pd.DataFrame, scores: dict[str, dict[str, float]
     blended: dict[str, float | None] = {}
     metadata: dict[str, Any] = {"scores": scores, "sources": forecast_df["source"].tolist()}
 
-    # Weighted baseline is still useful for directly comparable continuous vars.
+    # Continuous variables with an observed counterpart: weight = 1/MAE, or 1.0
+    # for a source with no (or zero) MAE in the scoring window.
     blendable = [
         "max_temp", "min_temp", "precipitation_sum", "wind_speed", "wind_gusts",
         "cloud_cover", "humidity", "pressure_msl",
@@ -419,13 +417,15 @@ def blend_weighted(forecast_df: pd.DataFrame, scores: dict[str, dict[str, float]
 
 
 def blend_forecast(db_path: Path, location: Location, window_days: int, target_date: date | None = None) -> dict[str, Any]:
-    """Blend every source's forecast for target_date (default: tomorrow).
+    """Blend every source's latest forecast for target_date (default:
+    default_forecast_target_date) and insert it into ensemble_predictions.
 
-    target_date exists for reconstructing a specific past day's live prediction
-    (e.g. one dropped by a database reset) rather than always "today+1" - the
-    history used for MAE weighting is explicitly bounded to strictly before
-    target_date so a backfilled reconstruction can't see data it "shouldn't
-    know yet" at that point in time, matching the walk-forward backtest's rule.
+    MAE weights come from the last `window_days` days of history (counted back
+    from local today), restricted to forecast dates strictly before
+    target_date, so a prediction for a past date can't see data it wouldn't
+    have had at the time - the same rule as the walk-forward backtest.
+    Returns an "error" result, writing nothing, if no forecasts exist for
+    target_date.
     """
     if target_date is None:
         target_date = default_forecast_target_date(db_path, location)
@@ -465,9 +465,9 @@ def blend_forecast(db_path: Path, location: Location, window_days: int, target_d
 def load_period_modelling_table(
     db_path: Path, location: Location, period: str, window_days: int | None = None
 ) -> pd.DataFrame:
-    """Small-slice sub-daily rain: forecast_periods joined to actual_periods,
-    scoped to one period - mirrors load_modelling_table, simplified to the
-    one variable (precipitation_sum) periods ever track.
+    """forecast_periods joined to actual_periods for one period - mirrors
+    load_modelling_table (same live-over-backfill ranking and window), for the
+    one variable periods track (precipitation_sum).
     """
     cutoff = "0000-01-01"
     if window_days:
@@ -566,7 +566,9 @@ def blend_period_precipitation(forecast_df: pd.DataFrame, scores: dict[str, floa
 def blend_forecast_period(
     db_path: Path, location: Location, period: str, window_days: int, target_date: date | None = None
 ) -> dict[str, Any]:
-    """Blend every source's period forecast for target_date (default: tomorrow) - mirrors blend_forecast."""
+    """Blend every source's forecast for one period of target_date (default:
+    default_forecast_target_date) into ensemble_predictions_periods - mirrors
+    blend_forecast."""
     if target_date is None:
         target_date = default_forecast_target_date(db_path, location)
     forecast_df = latest_forecast_periods_for_date(db_path, location, period, target_date)
@@ -614,19 +616,16 @@ def reconcile_period_predictions(
     """Rescale each date's 4 period predictions so they sum to the daily
     prediction for the same (model, location, date).
 
-    The daily precipitation_sum forecast and its 4-period split are blended
-    (ensemble) or trained (ML) completely independently, with no arithmetic
-    constraint linking them - even with fully self-consistent raw sources,
-    two independently-weighted or independently-trained models routinely
-    disagree (confirmed empirically: e.g. one day's ensemble blend predicted
-    2.83mm daily against a 1.49mm sum across its own 4 periods). This is a
-    pure post-hoc rescale of whatever was already blended/predicted, not a
-    re-blend - the daily prediction is treated as the anchor and the periods
-    are scaled to match it, preserving their relative shape.
+    The daily precipitation_sum and its 4-period split are blended (ensemble)
+    or trained (ML) independently, with nothing forcing them to agree, and
+    they routinely don't. This is a post-hoc rescale, not a re-blend: the
+    latest daily prediction is the anchor and the latest row for each period
+    is updated in place, scaled to match it while keeping their relative
+    shape. If every period is 0 but the daily total isn't, the total is split
+    evenly. Dates without a daily value or without all 4 periods are skipped.
 
-    `model_kind` is "ensemble" or "ml". Safe to call repeatedly (e.g. once
-    per location after every forecast/predict-ml/backtest run) - already-
-    reconciled dates rescale by a ~1.0 factor and are effectively a no-op.
+    `model_kind` is "ensemble" or "ml". Safe to call repeatedly -
+    already-reconciled dates rescale by a factor of ~1.0.
     """
     daily_table, period_table = _RECONCILE_TABLES[model_kind]
     reconciled = 0

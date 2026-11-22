@@ -14,7 +14,7 @@ _RAW_FIELDS = list(FORECAST_VARIABLES)
 
 # Each meta-model's own field set, mapping the shared "did_rain" concept to
 # whichever probability column that model actually stores - mirrors how
-# report._recent_forecast_data already reads these same three tables.
+# report._recent_forecast_data reads these same three tables.
 _META_TABLES = {MODEL_ENSEMBLE: "ensemble_predictions", MODEL_ML: "ml_predictions", MODEL_BEST: "best_predictions"}
 _META_FIELDS = {
     MODEL_ENSEMBLE: ["max_temp", "min_temp", "precipitation_sum", "rain_probability", "wind_speed", "wind_gusts", "cloud_cover", "humidity", "pressure_msl"],
@@ -66,18 +66,16 @@ def compute_data_quality(db_path: Path, location_names: list[str], window_days: 
     here needs lat/lon, and report.py (the caller) only has names on hand
     at this point anyway, derived from the already-scored long_df.
 
-    Two distinct failure modes, both real (see the investigation that
-    prompted this): a "missing row" is a source/model having produced no
-    forecast at all for a given (location, date) - the more consequential
-    kind, since it can silently leave a field blank downstream (this is
-    exactly what caused a gap in Best's Melbourne trend line: its top
-    candidate for several targets had zero forecast rows for one date). An
-    "unexpected null" is a populated row's field being null despite that
+    Two distinct failure modes: a "missing row" is a source/model having
+    produced no forecast at all for a given (location, date) since its first
+    appearance at that location - the more consequential kind, since it can
+    leave a field blank downstream (e.g. a candidate Best would have picked).
+    An "unexpected null" is a populated row's field being null despite that
     (entity, field) pair having reported a real value at least once
-    elsewhere in its own history - so a source that structurally never
-    covers a field (BOM has no wind/humidity/cloud/pressure numerics;
-    wttr.in has no precipitation total) doesn't inflate this number; only
-    genuine anomalies do.
+    elsewhere in its history - so a source that structurally never covers a
+    field (BOM has no wind/humidity/cloud/pressure numerics; wttr.in has no
+    precipitation total) doesn't inflate this number; only genuine anomalies
+    do. The window ends at the latest forecast_date across every table read.
 
     Returns {"__ALL__": {...}, "<location name>": {...}, ...}, each value
     shaped {"missing_pct": float, "null_pct": float, "entities": [{"name":

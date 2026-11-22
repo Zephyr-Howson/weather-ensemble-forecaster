@@ -133,11 +133,9 @@ def test_blend_forecast_period_reconstruction_excludes_lookahead_history(tmp_pat
 
 
 def test_train_and_predict_period_model_end_to_end(tmp_path):
-    """Seeds enough period history to clear MIN_TRAIN_ROWS-equivalent, trains
-    a real Ridge model for one period, and predicts tomorrow - asserting on
-    the actual written ml_predictions_periods row, not just "no exception"
-    (the exact class of bug that went undetected in backtest.py's INSERT
-    before it had any test coverage).
+    """Seeds enough period history to clear min_rows=30, trains a real Ridge
+    model for one period, and predicts tomorrow - asserting on the written
+    ml_predictions_periods row, not just "no exception".
     """
     db_path = tmp_path / "weather.db"
     model_dir = tmp_path / "models"
@@ -186,12 +184,10 @@ def test_train_and_predict_period_model_end_to_end(tmp_path):
 
 
 def test_backtest_period_predictions_writes_ensemble_and_ml_rows(tmp_path):
-    """Mirrors test_backtest.py's identical daily-level test. This one matters
-    for a distinct real reason: a live "tomorrow" prediction has no actual
-    yet to score against, so without walk-forward historical predictions
-    like these, the report's period leaderboard cards can only ever show raw
-    source accuracy - the ensemble/ML entries were confirmed missing from
-    the rendered report before backtest_period_predictions was added.
+    """Mirrors test_backtest.py's daily-level test. A live "tomorrow"
+    prediction has no actual yet to score against, so the report's period
+    leaderboard cards can only show ensemble/ML entries if walk-forward
+    historical period predictions like these are written.
     """
     db_path = tmp_path / "weather.db"
     period = "afternoon"
@@ -286,12 +282,10 @@ def _insert_period_predictions(db_path, table: str, forecast_date: date, period_
 
 
 def test_reconcile_period_predictions_rescales_periods_to_match_daily_total(tmp_path):
-    """Mirrors the real gap found in production: the ensemble's own daily
-    blend predicted 2.83mm for a day while its 4 independently-blended
-    periods summed to only 1.49mm - two independently-weighted quantities
-    with no arithmetic link between them. Reconciliation should rescale the
-    periods to sum to the (anchor) daily total while preserving their
-    relative shape.
+    """The daily blend and its 4 independently-blended periods have no
+    arithmetic link, so they can disagree (2.83mm daily vs periods summing to
+    1.49mm here). Reconciliation rescales the periods to sum to the (anchor)
+    daily total while preserving their relative shape.
     """
     db_path = tmp_path / "weather.db"
     forecast_date = date(2026, 7, 25)

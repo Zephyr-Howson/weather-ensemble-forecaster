@@ -26,22 +26,14 @@ from weather_ensemble.scoring import (
 )
 from weather_ensemble.service import default_forecast_target_date, latest_forecasts_for_date
 
-# "Best" picks, independently per target, whichever candidate - a raw
-# source, the Weighted blend, or the ML model - had the lowest MAE for that
-# one target in this location recently. The two naive baselines
-# (persistence/climatology) are deliberately not candidates: they exist to
-# show how much better real forecasting is than doing nothing, not as
-# strategies "Best" should ever adopt - if persistence really is winning,
-# that's a fact worth seeing on the baseline's own dashed line, not a value
-# worth copying into a hero series. MODEL_BEST itself is also excluded - once
-# report.py wired Best's own history into build_predictions_long (so it can
-# appear on the leaderboard/trend charts), it became just another row in the
-# same long_df this candidate pool is built from, and without this exclusion
-# Best could nominate itself as a candidate for its own future selection.
-# That's not just conceptually circular - _candidate_value_live/_backtest_best
-# have no defined value to copy for "model == best" (it isn't a real source,
-# ensemble, or ml), so on the live path it would silently win and then
-# resolve to no value at all, leaving that target unfilled.
+# "Best" picks, per target, whichever candidate - a raw source, the Weighted
+# blend, or the ML model - had the lowest MAE for that one target in this
+# location recently. The two naive baselines (persistence/climatology) are
+# not candidates: they exist to show how much better real forecasting is than
+# doing nothing, not as strategies Best should adopt. MODEL_BEST is excluded
+# too: build_predictions_long includes Best's own scored history (for the
+# report's leaderboard/trend charts), and Best must not select itself - it
+# has no forecast value of its own to copy.
 _EXCLUDED_CANDIDATES = {BASELINE_PERSISTENCE, BASELINE_CLIMATOLOGY, MODEL_BEST}
 
 DEFAULT_WINDOW_DAYS = 30
@@ -49,29 +41,26 @@ DEFAULT_MIN_DAYS = 14
 
 # The daily TARGETS set. Every target except precipitation_sum/did_rain is
 # selected independently (see _predictions_for_date). Sub-daily rain periods
-# (precipitation_sum_{period}) are NOT an independent selection here:
-# whichever candidate wins the daily precipitation_sum target has its own
-# period breakdown copied too (see _period_values_for_model), so the four
-# periods always sum to Best's own daily total instead of each period
-# potentially picking a different winner and disagreeing with it.
+# are not a separate selection: whichever candidate wins the daily
+# precipitation_sum target has its own period breakdown copied too (see
+# _period_values_for_model), so the four periods come from the same candidate
+# as Best's daily total.
 BEST_TARGETS: list[str] = list(TARGETS)
 
-# Only candidates that actually report sub-daily rain periods: the 4 raw
-# Open-Meteo model variants (see collect_forecast_periods in service.py - no
-# other raw provider ever collects period-level precipitation at all), plus
-# the two blended models, which are themselves built from a mix of raw
-# sources that always includes those 4. precipitation_sum and did_rain are
+# Only candidates that report sub-daily rain periods: the 4 raw Open-Meteo
+# models (collect_forecast_periods in service.py collects periods from
+# Open-Meteo only), plus Weighted and ML, whose period predictions are built
+# from those Open-Meteo period forecasts. precipitation_sum and did_rain are
 # both selected from this restricted pool (see _select_precip_and_rain), so
-# whichever one wins is guaranteed to have real period data to copy - Best
-# never goes blank for a target date just because the winner happened to be a
-# source that never reports periods at all (BOM, WeatherAPI, OpenWeatherMap,
-# Weatherbit, AccuWeather, Visual Crossing, wttr.in, SILO).
+# the winner can have period data to copy. The non-Open-Meteo providers (BOM,
+# WeatherAPI, OpenWeatherMap, Weatherbit, AccuWeather, Visual Crossing,
+# wttr.in) never report periods and so never win precipitation_sum/did_rain.
 PERIOD_AWARE_CANDIDATES = {MODEL_ENSEMBLE, MODEL_ML} | {f"open_meteo_{m}" for m in OPEN_METEO_MODELS}
 
 
 def candidate_pool(long_df: pd.DataFrame) -> pd.DataFrame:
     """Every real forecast strategy for one location - every raw source, plus
-    Weighted and ML - with the two naive baselines filtered out.
+    Weighted and ML - with the two naive baselines and Best itself filtered out.
     """
     if long_df.empty:
         return long_df
@@ -126,15 +115,10 @@ def rank_eligible_models(
     order rather than just the winner.
 
     _predictions_for_date walks this list and falls through to the next-
-    ranked candidate whenever the current one has no actual value for this
-    specific date - a real, if rare, case: a source that's been the most
-    accurate all month can still have a one-off collection gap on the exact
-    day being predicted (confirmed in practice - Melbourne's top wind/cloud/
-    pressure/precipitation performer was missing its own forecast row for a
-    single date, leaving those targets unfilled even though a perfectly good
-    second-best candidate had a value that day). Without this fallback,
-    "the single best candidate happened to be silent today" reads as a gap
-    in the chart, even though better information was available.
+    ranked candidate whenever the current one has no forecast value for this
+    specific date: the most accurate candidate over the window can still have
+    a one-off collection gap on the day being predicted, and the next-ranked
+    candidate's value is better than leaving the target blank.
     """
     if pool.empty:
         return []
@@ -281,29 +265,20 @@ def _select_precip_and_rain(
     value_for: Callable[[str, str], float | None],
     periods_for: Callable[[str], dict[str, float | None]],
 ) -> tuple[dict[str, Any], dict[str, str], dict[str, float | None]]:
-    """precipitation_sum and did_rain are chosen together, from whichever
-    PERIOD_AWARE_CANDIDATES model has the lowest trailing MAE on
-    precipitation_sum specifically - unlike every other BEST_TARGETS entry,
-    did_rain is NOT ranked independently. This guarantees the winner is
-    always a source that reports real period data in general, and that
-    Best's rain probability, precipitation total, and every period figure all
-    come from the exact same source instead of three independently-selected
-    winners that could disagree with each other.
+    """precipitation_sum and did_rain are chosen together, from the
+    PERIOD_AWARE_CANDIDATES ranked by trailing MAE on precipitation_sum -
+    did_rain is not ranked on its own MAE. Best's rain probability,
+    precipitation total and every period figure therefore all come from the
+    same candidate.
 
-    Among the ranked candidates, the first one that ALSO actually has period
-    data for this exact target_date wins outright - not just the first one
-    with a resolvable precipitation_sum value. A period-aware source can
-    still have a one-off gap in its own period collection on one specific
-    date (e.g. a brand-new live-only source whose period tracking came
-    online a day after its daily forecasts did - confirmed in practice), and
-    without this check that source could still win the daily figure while
-    leaving every period blank, exactly the kind of gap this whole selection
-    scheme exists to avoid. Only if NO ranked candidate has any period data
-    at all for this date does the search fall back to the best candidate
-    with just a value (the same graceful-degradation rule every other target
-    already gets, see rank_eligible_models) - Best still reports its best
-    available precipitation/rain figure rather than losing the day entirely,
-    with periods left blank as a genuine last resort.
+    The winner is the first ranked candidate that has both a
+    precipitation_sum value and at least one period value for this exact
+    target_date: a period-aware candidate can still have a one-off gap in its
+    period data on a given date, and picking it would leave every period
+    blank. If no ranked candidate has period data for the date, the
+    first-ranked candidate with a precipitation_sum value wins and the
+    periods are left blank. did_rain_probability is that same candidate's
+    rain probability, omitted if it has none.
     """
     predictions: dict[str, Any] = {}
     chosen: dict[str, str] = {}
@@ -388,25 +363,26 @@ def predict_best(
     min_days: int = DEFAULT_MIN_DAYS,
     target_date: date | None = None,
 ) -> dict[str, Any]:
-    """Generate tomorrow's (or target_date's) adaptive 'Best' prediction.
+    """Generate target_date's adaptive 'Best' prediction (default:
+    default_forecast_target_date, normally the location's local tomorrow).
 
-    For each target independently: find whichever candidate has the lowest
-    trailing window_days-day MAE in this location (min_days eligibility rule
-    - see select_best_model), then copy THAT candidate's own already-computed
-    forecast for target_date. "Best" never predicts anything itself; it only
-    ever selects among predictions that already exist.
+    For each target, rank candidates by trailing window_days-day MAE in this
+    location (min_days eligibility rule - see rank_eligible_models), then copy
+    the top-ranked candidate's own already-computed forecast for target_date,
+    falling through to the next-ranked one if it has no value.
+    precipitation_sum and did_rain are picked together from
+    PERIOD_AWARE_CANDIDATES (see _select_precip_and_rain). "Best" never
+    predicts anything itself; it only selects among predictions that already
+    exist. Writes best_predictions, plus best_predictions_periods when the
+    precipitation winner has period values.
     """
     if target_date is None:
         target_date = default_forecast_target_date(db_path, location)
 
-    # build_predictions_long's window_days cutoff is relative to *today*, not
-    # target_date - normally the same thing (target_date defaults to
-    # tomorrow), but reconstructing a specific past target_date (as
-    # blend_forecast/predict_latest_ml also support) needs the fetch to
-    # reach back window_days+5 (a small buffer) from target_date itself, not
-    # from today. Translated into build_predictions_long's own "days back
-    # from today" terms: however many days today already is past target_date,
-    # plus that same window_days+5.
+    # build_predictions_long's window_days cutoff is relative to the
+    # location's local today, not target_date. The fetch must reach back
+    # window_days+5 (a small buffer) from target_date itself, so a past
+    # target_date adds however many days today is past it.
     lookback_days = (local_today(location) - target_date).days + window_days + 5
     long_df = build_predictions_long(db_path, [location], window_days=max(lookback_days, window_days + 5))
     pool = candidate_pool(long_df)

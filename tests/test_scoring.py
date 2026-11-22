@@ -34,11 +34,9 @@ def test_compute_mae_scores_uses_true_observed_targets():
 
 def test_rolling_error_over_time_is_centered_not_trailing():
     """A centered window lets a date "see" errors from days after it, not just
-    before - that's the whole point of switching off pandas' default trailing
-    rolling window. 15 days of zero error except a single spike on day 8
-    (index 7); day 5 (index 4, three days before the spike) should reflect
-    it - a trailing window never would, since day 5 has no visibility into
-    day 8 yet.
+    before. 15 days of zero error except a single spike on day 8 (index 7);
+    day 5 (index 4, three days before the spike) reflects it - a trailing
+    window wouldn't, since day 5 has no visibility into day 8.
     """
     dates = pd.date_range("2026-06-01", periods=15, freq="D")
     abs_error = [0.0] * 15

@@ -74,11 +74,10 @@ def test_dedupe_is_idempotent_with_no_duplicates(tmp_path):
 
 
 def test_dedupe_covers_period_tables_keeping_newest_generated_at(tmp_path):
-    """The period tables (sub-daily rain) previously had no dedupe coverage
-    at all - repeated manual pipeline runs on the same day left multiple
-    generations of the same (location, date, period) prediction sitting
-    around. deduplicate() now also cleans those up, same newest-wins rule as
-    ensemble_predictions.
+    """deduplicate() also covers the period (sub-daily rain) tables: repeated
+    runs on the same day can leave several generations of the same
+    (location, date, period) prediction, and the newest generated_at wins,
+    as in ensemble_predictions.
     """
     db_path = tmp_path / "weather.db"
     with connect_periods(get_periods_db_path(db_path)) as conn:

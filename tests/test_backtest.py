@@ -54,12 +54,9 @@ def _actual(actual_date: date, value: float) -> ActualRecord:
 def test_backtest_predictions_writes_ensemble_and_ml_rows(tmp_path):
     """End-to-end: seed enough forecast+actual history (backtest.py's ML step
     needs >= MIN_TRAIN_ROWS=30 rows of prior history to attempt training) and
-    run a real backtest for the most recent day. This exists because
-    backtest.py's INSERT statements had zero test coverage and a real
-    column/placeholder count mismatch (17 columns, 16 placeholders) went
-    undetected until it broke every location's regeneration at once -
-    asserting on the actual written rows, not just "no exception", would have
-    caught it immediately.
+    run a real backtest for the most recent day. Asserts on the written rows,
+    not just "no exception", so a mismatch between an INSERT's columns and
+    placeholders fails here.
     """
     db_path = tmp_path / "weather.db"
     start = date(2026, 5, 1)

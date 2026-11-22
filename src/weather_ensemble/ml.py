@@ -34,43 +34,32 @@ DATE_FEATURES = ["month", "day_of_year", "day_of_week"]
 # so its features are drawn from precipitation_sum's columns instead.
 FEATURE_TARGET_OVERRIDE = {"did_rain": "precipitation_sum"}
 
-# Ridge has no non-negativity constraint, so it can (and does) predict a
-# slightly negative value for a quantity that physically can't go below zero -
-# most visibly precipitation on a dry day. Clip these at 0 wherever a
+# Ridge has no non-negativity constraint, so it can predict a slightly
+# negative value for a quantity that physically can't go below zero - most
+# visibly precipitation on a dry day. These are clipped at 0 wherever a
 # regression prediction is produced or evaluated, so a model's reported MAE
-# and its actually-served prediction agree, and neither is inflated by an
-# impossible negative value.
+# and its served prediction agree.
 NON_NEGATIVE_TARGETS = {
     "precipitation_sum", "wind_speed", "wind_gusts",
     "cloud_cover", "humidity", "pressure_msl",
 }
 
-# Ridge also has no upper bound. cloud_cover/humidity are percentages that
-# can't physically exceed 100 - normally harmless, but a row with a missing/
-# imputed feature can push the model to extrapolate past it (a real incident:
-# 467.9% predicted cloud cover for one location on a day several of its
-# forecast sources had a gap). precipitation_sum has no fixed 0-100 bound, but
-# Ridge can still extrapolate wildly on the rare heavy-rain rows that are
-# least represented in training (a real incident: an 11,751mm prediction on a
-# day sources forecast 17-40mm). Australia's official 24h rainfall record is
-# ~907mm (Crohamhurst, 1893); 500mm safely bounds any plausible single-day
-# forecast while still catching genuine runaway extrapolation. Wind/UV have
-# no comparable ceiling worth enforcing.
+# Ridge has no upper bound either. cloud_cover/humidity are percentages capped
+# at 100: a row with missing/imputed features can push the model past it.
+# precipitation_sum is capped at 500mm because Ridge can extrapolate wildly on
+# the rare heavy-rain rows least represented in training; Australia's 24h
+# rainfall record is ~907mm, so 500mm bounds any plausible single-day forecast
+# while still catching runaway extrapolation. Wind has no comparable ceiling.
 #
-# A log1p/expm1 target transform (TransformedTargetRegressor) was tried here
-# to compress precipitation's skewed tail before fitting. It made things
-# worse, not better: expm1 is exponential, so a log-space prediction that's
-# only moderately too high (easy to produce with production's many
-# correlated per-source/cross-source-stat features) explodes on inversion.
-# Even with this same 500mm ceiling in place, 1.6% of backtest predictions
-# landed at or near the ceiling on days with single-digit actual rainfall,
-# pushing overall MAE from 1.13mm to 6.29mm - worse than plain Ridge, and
-# visibly absurd in the report. Reverted; plain Ridge + this ceiling is the
-# simpler and more accurate option.
+# Precipitation is fitted with plain Ridge plus this ceiling, not a
+# log1p/expm1 target transform: expm1's exponential inversion turns a
+# moderately-high log-space prediction into an extreme one, and that approach
+# scored markedly worse in backtests.
 CEILING_TARGETS = {"cloud_cover": 100.0, "humidity": 100.0, "precipitation_sum": 500.0}
 
 
 def clip_prediction(target_name: str, value: float) -> float:
+    """Clamp a regression prediction to [0, CEILING_TARGETS] for NON_NEGATIVE_TARGETS."""
     if target_name not in NON_NEGATIVE_TARGETS:
         return value
     value = max(0.0, value)
@@ -91,7 +80,12 @@ class TrainedModelBundle:
 
 
 def _build_wide_feature_table(long_df: pd.DataFrame, include_targets: bool) -> pd.DataFrame:
-    """Build wide source-agreement features from a long forecast table."""
+    """Build wide source-agreement features from a long forecast table.
+
+    One row per (location_name, forecast_date): a `{source}__{var}` column per
+    source and FORECAST_VARIABLES entry, month/day_of_year/day_of_week, and
+    per-variable cross-source mean/median/std/min/max/range/count columns.
+    """
     if long_df.empty:
         return long_df
 
@@ -131,44 +125,41 @@ def _build_wide_feature_table(long_df: pd.DataFrame, include_targets: bool) -> p
             wide[f"source_range__{var}"] = wide[f"source_max__{var}"] - wide[f"source_min__{var}"]
             wide[f"source_count__{var}"] = wide[source_cols].notna().sum(axis=1)
 
-            # A source missing on one particular day (a collection gap, a
-            # provider outage) leaves that column NaN just for this row, which
-            # the model pipeline's SimpleImputer would otherwise fill from a
-            # column-wide historical median - a value with no relationship to
-            # what every other source is actually saying about this specific
-            # day. That mismatch is what let one missing feature drag a Ridge
-            # prediction to a physically impossible 467.9% cloud cover on a
-            # real incident. Filling from this row's own cross-source median
-            # instead grounds the substitute in today's actual conditions.
-            # This must happen after the spread stats above are computed - an
-            # already-filled column would understate source_std/source_range,
-            # falsely implying every source agreed when one was silently a
-            # stand-in for the rest.
+            # A source missing on one day (a collection gap, a provider
+            # outage) is filled from this row's own cross-source median, not
+            # left to the pipeline's SimpleImputer, whose column-wide training
+            # median has no relationship to this day's conditions and can push
+            # Ridge into physically impossible predictions. The fill happens
+            # after the spread stats above, so source_std/source_range reflect
+            # only the sources that actually reported.
             wide[source_cols] = wide[source_cols].apply(lambda col, var=var: col.fillna(wide[f"source_median__{var}"]))
 
     return wide.sort_values("forecast_date")
 
 
 def build_feature_table(db_path: Path, location: Location, window_days: int | None = None) -> pd.DataFrame:
-    """Build one wide training row per forecast date.
+    """Build one wide training row per forecast date that has an actual.
 
     Includes source-specific forecast columns plus ensemble statistics across
-    sources: mean, median, std, min, max and range. These disagreement/spread
-    features are often as important as the raw provider values.
+    sources: mean, median, std, min, max, range and count. These
+    disagreement/spread features are often as important as the raw provider
+    values.
 
-    window_days bounds how far back training history goes. Without it, every
-    row ever collected is used, which lets newly-added sources sit mostly-null
-    for a long time (diluted by history from before they existed) and keeps
-    training on old regimes (retired sources, since-updated provider models)
-    forever. A bounded window trades some of that history for training data
-    that's more representative of the sources actually live today.
+    window_days keeps only forecast dates within that many days of the
+    location's local today (None uses all history). A bounded window keeps
+    training representative of the sources live today: unbounded history
+    leaves recently added sources mostly null and keeps fitting retired
+    sources and superseded provider models.
     """
     long_df = load_modelling_table(db_path, location, window_days=window_days)
     return _build_wide_feature_table(long_df, include_targets=True)
 
 
 def build_prediction_feature_table(db_path: Path, location: Location, target_date: date | None = None) -> pd.DataFrame:
-    """Build a wide feature row for target_date (default: tomorrow, in the location's local time)."""
+    """Build a wide feature row for target_date (default: default_forecast_target_date).
+
+    Uses each source's most recently collected forecast for that date.
+    """
     if target_date is None:
         target_date = default_forecast_target_date(db_path, location)
     long_df = latest_forecasts_for_date(db_path, location, target_date)
@@ -186,8 +177,8 @@ def features_for_target(df: pd.DataFrame, var: str) -> list[str]:
     """Only this variable's own signals: its per-source forecasts, cross-source stats, and date features.
 
     Using every forecast variable's columns to predict every target is a p >> n setup on a dataset
-    this small, and overfits badly (see notebooks/ml_model_comparison.ipynb). source_count is dropped
-    since all configured sources are typically present for backfilled rows, making it constant/uninformative.
+    this small, and overfits badly (see notebooks/ml_model_comparison.ipynb).
+    source_count is excluded: it is close to constant across rows, so it carries little signal.
     """
     cols = [c for c in df.columns if c.endswith(f"__{var}") and c != f"source_count__{var}"]
     return cols + [c for c in DATE_FEATURES if c in df.columns]
@@ -223,6 +214,15 @@ def train_models(
     test_size: float = 0.25,
     window_days: int | None = None,
 ) -> dict[str, Any]:
+    """Train one model per TARGETS entry for this location and pickle it to output_dir.
+
+    did_rain is a LogisticRegression classifier; every other target is Ridge
+    (alpha=1.0), both behind a median SimpleImputer. Rows are split
+    chronologically (no shuffle): the oldest (1 - test_size) train the saved
+    model and the newest test_size are held out for the reported metrics.
+    A target is skipped with fewer than min_rows labelled rows. Writes
+    `{target}.pkl` (a TrainedModelBundle) per target plus training_summary.json.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     df = build_feature_table(db_path, location, window_days=window_days)
     if df.empty:
@@ -306,12 +306,12 @@ def load_model_bundle(model_dir: Path, target: str) -> TrainedModelBundle:
 def build_period_feature_table(
     db_path: Path, location: Location, period: str, window_days: int | None = None
 ) -> pd.DataFrame:
-    """Small-slice sub-daily rain: mirrors build_feature_table, one period at
-    a time. Reuses _build_wide_feature_table as-is - it already skips any
-    FORECAST_VARIABLES entry not present in the input, and precipitation_sum
-    (the only variable period data carries) is also a daily TARGETS entry, so
-    the existing include_targets base-column logic picks up
-    actual_precipitation_sum/actual_did_rain with no changes needed.
+    """Sub-daily rain: mirrors build_feature_table, one period at a time.
+
+    _build_wide_feature_table skips any FORECAST_VARIABLES entry not present
+    in the input (period rows carry only precipitation_sum and
+    rain_probability), and its include_targets base columns pick up
+    actual_precipitation_sum/actual_did_rain from the period actuals.
     """
     long_df = load_period_modelling_table(db_path, location, period, window_days=window_days)
     return _build_wide_feature_table(long_df, include_targets=True)
@@ -336,9 +336,10 @@ def train_period_model(
     test_size: float = 0.25,
     window_days: int | None = None,
 ) -> dict[str, Any]:
-    """Small-slice sub-daily rain: a single precipitation_sum Ridge model per
-    (location, period) - mirrors train_models, narrowed to one target since
-    that's the only thing period data predicts so far.
+    """Sub-daily rain: a single precipitation_sum Ridge model per (location,
+    period), trained and evaluated like train_models' regression targets and
+    saved as `precipitation_sum_{period}.pkl`. Period models predict
+    precipitation_sum only; there is no did_rain classifier per period.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     df = build_period_feature_table(db_path, location, period, window_days=window_days)
@@ -441,16 +442,14 @@ def predict_latest_ml_period(
 def _fill_missing_sources_from_row_median(X: pd.DataFrame, raw: pd.DataFrame, var: str) -> pd.DataFrame:
     """Fill any of var's per-source feature columns that are missing in X after
     reindexing to the trained model's feature set, using this row's own
-    cross-source median for var - computed fresh from whatever sources
-    actually reported in `raw`, not the columns the pipeline's SimpleImputer
-    would otherwise fall back to (a historical median from whenever the model
-    was trained, with no relationship to this specific day's conditions).
+    cross-source median for var - computed from whatever sources actually
+    reported in `raw`, not the historical training median the pipeline's
+    SimpleImputer would otherwise use.
 
-    _build_wide_feature_table's own fallback fill (used by training/backtest,
-    which always builds from a multi-day table) only helps when a source's
-    column already exists elsewhere in the window; a source absent from a
-    single-day live prediction never gets a column there at all - reindex
-    introduces it as all-NaN - so this covers that case specifically.
+    _build_wide_feature_table's fill only covers a source whose column exists
+    in the table being built; a source absent from a single-day live
+    prediction has no column there at all (reindex introduces it as all-NaN),
+    so this covers that case.
     """
     source_cols = [c for c in X.columns if c.endswith(f"__{var}") and not c.startswith("source_")]
     if not source_cols:
@@ -462,10 +461,12 @@ def _fill_missing_sources_from_row_median(X: pd.DataFrame, raw: pd.DataFrame, va
 
 
 def predict_latest_ml(db_path: Path, location: Location, model_dir: Path, target_date: date | None = None) -> dict[str, Any]:
-    """Predict target_date (default: tomorrow) with the currently trained models.
+    """Predict target_date with the currently trained models and store it in ml_predictions.
 
-    target_date exists for reconstructing a specific past day's live prediction
-    (e.g. one dropped by a database reset) rather than always "today+1".
+    target_date defaults to default_forecast_target_date (normally the
+    location's local tomorrow). Passing it explicitly lets a run use one
+    resolved date for every step, or reconstruct a specific past day's
+    prediction.
     """
     df = build_prediction_feature_table(db_path, location, target_date=target_date)
     if df.empty:

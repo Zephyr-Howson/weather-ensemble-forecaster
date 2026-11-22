@@ -8,23 +8,23 @@ from typing import Any
 from weather_ensemble import db
 from weather_ensemble.config import get_report_archive_db_path
 
-# Snapshots older than this are simply dropped, not thinned to a lower
-# frequency - a self-contained HTML report (embedded Plotly data) still
-# compresses to several hundred KB each, so keeping every day going back
-# indefinitely isn't sustainable in a file this project commits to git
-# regularly. 30 days is enough to look back at "what did last week/month's
-# report look like" without the archive growing forever.
+# Snapshots older than this are dropped, not thinned to a lower frequency.
+# Each gzipped self-contained HTML report (embedded Plotly data) is around
+# 1 MB, and the archive DB is committed to git by the
+# regenerate-report workflow, so it must not grow without bound.
 RETENTION_DAYS = 30
 
 
 def save_report_snapshot(db_path: Path, html: str, generated_at: datetime | None = None) -> dict[str, Any]:
-    """Gzip-compress the just-rendered report and store it as one row,
-    keyed by generated_at, then prune anything older than RETENTION_DAYS.
+    """Gzip-compress the just-rendered report and store it as one row of
+    report_snapshots (in the separate archive DB, see
+    get_report_archive_db_path), keyed by generated_at, then delete every
+    snapshot older than RETENTION_DAYS before generated_at.
 
-    Pruning runs every time a snapshot is saved (rather than as a separate
-    maintenance step someone has to remember to invoke) so the archive is
-    always self-cleaning - the report only regenerates a handful of times a
-    day at most, so this is cheap to check on every call.
+    `generated_at` defaults to the current UTC time (naive, to the second); a
+    second save with the same timestamp is ignored. Pruning runs on every save,
+    so the archive needs no separate maintenance step. Returns the stored
+    timestamp, the compressed size in bytes and the number of rows pruned.
     """
     generated_at = generated_at or datetime.now(UTC).replace(tzinfo=None)
     generated_at_iso = generated_at.isoformat(timespec="seconds")

@@ -29,13 +29,13 @@ def _get_location_key(location: Location, api_key: str) -> str:
 def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
     """Fetch target_date's forecast from AccuWeather's 5-day daily forecast endpoint.
 
-    Requires ACCUWEATHER_KEY in your .env. This collector is live-forecast only;
-    historical backfill remains Open-Meteo's job.
+    Requires ACCUWEATHER_KEY in your .env. Makes two requests: a geoposition
+    lookup for the location key, then the metric daily forecast with
+    details=true. Live-only; historical backfill is Open-Meteo's job.
 
-    Note: AccuWeather's location-key lookup and daily-forecast field names (in
-    particular UV index and humidity, which the base 5-day endpoint may not expose)
-    were not verified against a live response while building this - worth
-    double-checking raw_json the first time this runs with a real key.
+    Day-part values are used for rain, wind, cloud and humidity. pressure_msl is
+    left None, and weather_code holds AccuWeather's own icon number, not a WMO
+    code.
     """
     api_key = os.getenv("ACCUWEATHER_KEY")
     if not api_key:

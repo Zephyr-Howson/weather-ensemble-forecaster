@@ -282,13 +282,11 @@ def backtest_period_predictions(
     ensemble_window_days: int = 30,
     train_window_days: int = 90,
 ) -> dict[str, Any]:
-    """Small-slice sub-daily rain: mirrors backtest_predictions, one period +
-    precipitation_sum only. Needed for the report's ensemble/ML leaderboard
-    entries to have anything to show at all - a live "tomorrow" prediction
-    has no actual yet to score against, so without walk-forward historical
-    predictions like these, the report's period cards can only ever show raw
-    source accuracy, never ensemble/ML (a real gap found by checking the
-    freshly-built report cards, not assumed away).
+    """Sub-daily rain: mirrors backtest_predictions for one period,
+    precipitation_sum only, writing ensemble_predictions_periods and
+    ml_predictions_periods. These walk-forward predictions give the report's
+    period cards scored Weighted/ML history: a live "tomorrow" prediction has
+    no actual yet to score against.
     """
     long_df = load_period_modelling_table(db_path, location, period)
     if long_df.empty:
@@ -336,13 +334,17 @@ def backtest_predictions(
 ) -> dict[str, Any]:
     """Regenerate ensemble + ML predictions for each of the past `days` days, walk-forward.
 
-    For target date D, the ensemble's MAE weighting and the ML model's training
-    data only use rows with forecast_date < D - exactly as if D were the
+    Target dates are the `days` calendar dates ending at the latest forecast
+    date that has an actual. For target date D, the ensemble's MAE
+    weighting uses rows in [D - ensemble_window_days, D) and the ML models
+    train on rows in [D - train_window_days, D) - exactly as if D were the
     present, so nothing D "shouldn't know yet" leaks in. A fresh Ridge/
-    LogisticRegression model is trained from scratch for every date (this is
-    what makes it a true walk-forward backtest rather than one model scored
-    against its own future). Dates that already have a real prediction are
-    left untouched; this only fills gaps.
+    LogisticRegression model per target is trained from scratch for every
+    date (on the whole window, needing MIN_TRAIN_ROWS labelled rows), rather
+    than one model scored against its own future. ML rows are tagged with
+    BACKTEST_MODEL_VERSION. Dates that already have a row in
+    ensemble_predictions/ml_predictions are left untouched; this only fills
+    gaps.
     """
     long_df = load_modelling_table(db_path, location)
     if long_df.empty:
@@ -393,10 +395,10 @@ def _backtest_best(
         return "skipped_existing"
 
     def value_for(model: str, target: str):
-        """The winning candidate's own scored prediction at target_date -
-        target_date is a past date with a known actual, so (unlike the live
-        'tomorrow' path in best.py) the value is already sitting in `pool`
-        rather than needing a fresh DB lookup.
+        """A candidate's own scored prediction at target_date - target_date
+        is a past date with a known actual, so (unlike the live 'tomorrow'
+        path in best.py) the value is already in `pool` rather than needing a
+        DB lookup.
         """
         row = pool[
             (pool["model"] == model) & (pool["target"] == target) & (pool["forecast_date"] == pd.Timestamp(target_date))
@@ -428,18 +430,19 @@ def backtest_best_predictions(
 ) -> dict[str, Any]:
     """Regenerate the adaptive 'Best' pick for each of the past `days` days, walk-forward.
 
-    For target date D and each target independently, select_best_model only
-    ever ranks candidates using rows with forecast_date < D (see best.py), so
-    nothing D "shouldn't know yet" leaks in - the same walk-forward rule
-    backtest_predictions already applies to ensemble/ML. Dates that already
-    have a prediction are left untouched; this only fills gaps.
+    Uses the same selection as predict_best (_predictions_for_date). For
+    target date D, rank_eligible_models only ranks candidates using rows with
+    forecast_date < D (see best.py), so nothing D "shouldn't know yet" leaks
+    in - the same walk-forward rule backtest_predictions applies to
+    ensemble/ML. Candidate values come from the scored pool, so only dates
+    with actuals are covered. Dates that already have a best_predictions row
+    are left untouched; this only fills gaps.
     """
     # Unbounded, not window_days-bounded: build_predictions_long's window_days
-    # cutoff is relative to *today*, not to any particular target_date - for
-    # a walk-forward over many past dates (the earliest of which can be
-    # months before today) that cutoff would silently exclude exactly the
-    # history the earliest dates' own eligibility windows need. Matches
-    # backtest_predictions's identical unbounded fetch for the same reason.
+    # cutoff is relative to today, not to any particular target_date, so a
+    # bounded fetch would exclude the history the earliest target dates'
+    # eligibility windows need. backtest_predictions fetches unbounded for
+    # the same reason.
     long_df = build_predictions_long(db_path, [location])
     pool = candidate_pool(long_df)
     if pool.empty:

@@ -92,9 +92,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--name", help="Location name")
     parser.add_argument("--timezone", help="Timezone, e.g. Australia/Melbourne")
     parser.add_argument("--db", type=Path, default=get_db_path(), help="SQLite DB path")
-    parser.add_argument("--window", type=int, default=get_rolling_window_days())
+    parser.add_argument(
+        "--window",
+        type=int,
+        default=get_rolling_window_days(),
+        help="Lookback (days) of scored history used to MAE-weight each source in the Weighted blend "
+        "(default ROLLING_WINDOW_DAYS env var, else 30)",
+    )
 
-    parser.add_argument("--collect", action="store_true", help="Collect forecasts for tomorrow")
+    parser.add_argument(
+        "--collect",
+        action="store_true",
+        help="Collect every source's forecast for tomorrow (first catching up any recently "
+        "missed dates)",
+    )
     parser.add_argument("--collect-open-meteo", action="store_true", help="Collect only free Open-Meteo model forecasts")
     parser.add_argument("--record-actual", action="store_true", help="Record yesterday's actual weather (plus any recent day still missing one)")
     parser.add_argument(
@@ -109,7 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Build wide ML feature table and save to parquet/csv",
     )
-    parser.add_argument("--train", action="store_true", help="Train Phase 3 ML models")
+    parser.add_argument("--train", action="store_true", help="Train the per-location ML models")
     parser.add_argument(
         "--train-window",
         type=int,
@@ -127,7 +138,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--deploy-phases",
         type=int,
         metavar="DAYS",
-        help="Run Phase 1 backfill, Phase 2 dataset build, and Phase 3 model training",
+        help="One-shot setup for a single location: backfill DAYS, collect, record actuals, build the "
+        "feature table, train and predict ML. Ignores every other per-location flag",
     )
     parser.add_argument(
         "--backtest-days",
@@ -147,11 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--best-window-days",
         type=int,
         default=DEFAULT_WINDOW_DAYS,
-        help=f"Best's own trailing lookback (days) for ranking candidates - deliberately separate "
-        f"from --window (the Weighted blend's MAE-lookback, env-overridable via ROLLING_WINDOW_DAYS "
-        f"and often set much shorter) since reusing that flag here would silently make the min_days "
-        f"eligibility rule far stricter than intended whenever the two happen to end up equal "
-        f"(default {DEFAULT_WINDOW_DAYS})",
+        help=f"Trailing lookback (days) Best ranks candidates over - separate from --window, the "
+        f"Weighted blend's MAE lookback (default {DEFAULT_WINDOW_DAYS})",
     )
     parser.add_argument(
         "--best-min-days",
@@ -185,7 +194,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--accuracy-report",
         type=Path,
         metavar="PATH",
-        help="Write an interactive HTML report scoring ensemble/ML/individual sources/baselines "
+        help="Write an interactive HTML report scoring Weighted/ML/Best/individual sources/baselines "
         "against actuals over time (pools every location when combined with --all-locations)",
     )
     parser.add_argument(
@@ -228,9 +237,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--export-blob-backlog",
         action="store_true",
-        help="One-time: move every write-only JSON blob column's existing content "
-        "(forecasts/actuals.raw_json, ensemble/ML predictions' metadata_json) to Parquet under "
-        "data/archive/, then clear it from the live row. Safe to re-run - reports 0 archived once done.",
+        help="Move every write-only JSON blob column's existing content (forecasts/actuals "
+        "raw_json, every prediction table's metadata_json) to Parquet under data/archive/, then "
+        "clear it from the live row. Safe to re-run.",
     )
     parser.add_argument(
         "--archive-forecasts-days",
@@ -241,35 +250,33 @@ def build_parser() -> argparse.ArgumentParser:
         "forever and untouched by this. Safe to run on a schedule.",
     )
 
-    # Small-slice sub-daily (morning/afternoon/evening) rain prediction - kept
-    # as separate, explicit, opt-in flags rather than folded into --all/
-    # --deploy-phases, so nothing about the existing daily pipeline's
-    # behavior changes until this is validated. Open-Meteo only (see
-    # ForecastPeriodRecord); precipitation_sum only, no did_rain classifier.
+    # Sub-daily (overnight/morning/afternoon/evening) rain prediction. These are
+    # separate opt-in flags, not part of --all or --deploy-phases. Open-Meteo
+    # models only, and precipitation_sum only (no did_rain classifier).
     parser.add_argument(
-        "--collect-periods", action="store_true", help="[small slice] Collect sub-daily rain forecasts for tomorrow"
+        "--collect-periods", action="store_true", help="Collect sub-daily rain forecasts for the target date"
     )
     parser.add_argument(
-        "--record-actual-periods", action="store_true", help="[small slice] Record yesterday's sub-daily rain actuals (plus any recent gap)"
+        "--record-actual-periods", action="store_true", help="Record yesterday's sub-daily rain actuals (plus any recent gap)"
     )
     parser.add_argument(
         "--forecast-periods",
         action="store_true",
-        help="[small slice] Generate weighted-average sub-daily rain forecast for every period",
+        help="Generate weighted-average sub-daily rain forecast for every period",
     )
     parser.add_argument(
-        "--train-periods", action="store_true", help="[small slice] Train per-period precipitation models"
+        "--train-periods", action="store_true", help="Train per-period precipitation models"
     )
     parser.add_argument(
         "--predict-ml-periods",
         action="store_true",
-        help="[small slice] Predict sub-daily rain using trained per-period models",
+        help="Predict sub-daily rain using trained per-period models",
     )
     parser.add_argument(
         "--backtest-periods-days",
         type=int,
         metavar="DAYS",
-        help="[small slice] Walk-forward: regenerate sub-daily rain ensemble+ML predictions for each "
+        help="Walk-forward: regenerate sub-daily rain ensemble+ML predictions for each "
         "of the past DAYS days. Needed for the report's ensemble/ML leaderboard entries to have "
         "anything to show - a live prediction has no actual yet to score against.",
     )
@@ -295,14 +302,10 @@ def _write_dataframe(df, path: Path) -> Path:
 def _guarded(location: Location, step: str, fn) -> bool:
     """Run one location's step in isolation from every other step and location.
 
-    Mirrors the per-source try/except collect_forecasts already uses (one bad
-    provider shouldn't sink the whole collection run) - but the per-location
-    steps here (record_actual, blend_forecast, train, predict_ml, backtest)
-    previously had no such guard, so a single transient failure (a timeout, an
-    upstream 5xx) for any one of the 30 locations would crash the whole
-    --all-locations run and skip every step - and location - after it,
-    including the report regeneration and the daily commit. A step failing
-    here is logged and the run moves on instead.
+    Any exception is logged as a WARN line (with API keys redacted) and reported
+    as False, so one transient failure (a timeout, an upstream 5xx) for one
+    location doesn't stop the remaining steps and locations from running. This
+    is the per-step counterpart of collect_forecasts's per-source try/except.
     """
     try:
         fn()
@@ -316,19 +319,17 @@ def _catch_up_missed_forecasts(args: argparse.Namespace, location: Location) -> 
     """Backfill and walk-forward-reconstruct any recent date this location has
     no ensemble prediction for, before today's normal collection runs.
 
-    Exists so a run that starts late enough to cross local midnight (see
-    service.default_forecast_target_date's docstring for the 2026-08-27
-    incident this fixes) doesn't leave the skipped date permanently blank: the
-    very next run finds it via service.missing_ensemble_dates, backfills its
-    raw Open-Meteo forecasts (the only sources with an archived-forecast
-    endpoint - see README's source table), walk-forward reconstructs
-    Weighted/ML/Best exactly as --backtest-days/--backtest-best-days already
-    do for manual gap recovery, and regenerates its narrative. A gap found
-    while the missed date is still in progress (i.e. discovered on the same
-    delayed run that caused it) can't be recovered here yet - Open-Meteo's
-    historical-forecast archive only covers completed days - and is simply
-    left for this function to pick up on the next call. Effectively a no-op
-    (one SELECT) once there's nothing missing in the lookback window.
+    service.missing_ensemble_dates finds dates before local today with no
+    ensemble_predictions row (within CATCH_UP_LOOKBACK_DAYS). For a gap
+    starting N days ago this backfills N days of actuals and Open-Meteo
+    historical forecasts, daily and per period (Open-Meteo is the only source
+    with an archived-forecast endpoint), walk-forward reconstructs Weighted/ML
+    and then Best for the latest N days with data (as --backtest-days/
+    --backtest-best-days do, skipping dates that already have a prediction),
+    and generates a narrative for each missing date. Only completed days are
+    considered, because Open-Meteo's historical-forecast archive only covers
+    those; a date still in progress is picked up by a later run. Costs a
+    couple of SELECTs when nothing is missing.
     """
     missing = missing_ensemble_dates(args.db, location)
     if not missing:
@@ -370,19 +371,13 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         ok &= _guarded(location, "catch_up_missed_forecasts", _catch_up)
 
     # The date every forward-looking step below works on, resolved once per
-    # location per run (lazily, so it's only queried if one of those steps
-    # actually runs - always after catch-up above, and before --forecast
-    # writes anything) and passed to each step explicitly. A real incident:
-    # each step used to fall back on its own default_forecast_target_date,
-    # which is "one past the latest ensemble row, capped at local tomorrow" -
-    # so the moment --forecast wrote that row, every later step re-resolved
-    # to the day after. On an on-time evening run the cap hid this; but
-    # GitHub's scheduler has been starting this ~6.5 hours late, past local
-    # midnight everywhere east of WA, and from 2026-09-21 --predict-ml,
-    # --predict-best, --narrate-best and every period step there looked for
-    # a date nothing had been collected for yet. 207 of 330 location-days up
-    # to 2026-10-01 got no ML, Best or narrative - only Perth/Broome/
-    # Margaret River (whose midnight comes 2-3 hours later) were unaffected.
+    # location per run and passed to each step explicitly. It is resolved
+    # lazily (only if one of those steps runs), which is always after the
+    # catch-up above and before --forecast writes anything.
+    # default_forecast_target_date is "one past the latest ensemble row, capped
+    # at local tomorrow", so re-resolving it after --forecast has written that
+    # row would move later steps on to the following day whenever the run
+    # starts after local midnight (GitHub's scheduled runs can start hours late).
     target_date = cache(lambda: default_forecast_target_date(args.db, location))
 
     if args.backfill:
@@ -491,16 +486,12 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
 
     if args.predict_best:
         # Runs after --forecast/--predict-ml/--collect-periods/
-        # --forecast-periods/--predict-ml-periods above, since it only ever
-        # copies an already-computed candidate's value for tomorrow - it
-        # needs this run's own fresh Weighted/ML daily predictions to already
-        # exist if either turns out to be today's winning candidate, AND (now
-        # that precipitation_sum/did_rain selection is restricted to
-        # PERIOD_AWARE_CANDIDATES, see best.py) it needs this run's own fresh
-        # period rows for ensemble/ml already collected and reconciled to
-        # their daily total - otherwise a period-aware candidate could win
-        # here before its own periods for today even exist yet, leaving
-        # Best's period breakdown blank despite picking an eligible winner.
+        # --forecast-periods/--predict-ml-periods above, because Best only
+        # copies an already-computed candidate's value: this run's Weighted/ML
+        # daily predictions must already exist, and so must this run's period
+        # rows (reconciled to their daily totals), since precipitation_sum/
+        # did_rain are chosen from PERIOD_AWARE_CANDIDATES and Best copies the
+        # winner's period breakdown (see best.py).
         def _predict_best():
             result = predict_best(
                 args.db, location, window_days=args.best_window_days, min_days=args.best_min_days, target_date=target_date()
@@ -509,13 +500,11 @@ def _run_for_location(args: argparse.Namespace, location: Location) -> bool:
         ok &= _guarded(location, "predict_best", _predict_best)
 
     if args.narrate_best:
-        # Runs after --predict-best above - it just reads whatever Best
-        # already picked for tomorrow (periods included) and asks Claude for
-        # a one-paragraph plain-English summary of it. See narrative.py:
-        # any failure at all (no API key, network error, rate limit,
-        # malformed reply) comes back as a "skipped" result, never an
-        # exception - a bad night for this one small feature should never
-        # sink the rest of the run.
+        # Runs after --predict-best above: it reads whatever Best picked for
+        # the target date (periods included) and asks Claude for a short
+        # plain-English summary. See narrative.py: any failure (no API key,
+        # network error, rate limit, malformed reply) comes back as a
+        # "skipped" result, not an exception.
         def _narrate_best():
             result = generate_and_store_best_narrative(args.db, location, target_date=target_date())
             _print_json(result)
@@ -618,12 +607,10 @@ def main() -> None:
                     f"WARN: {len(failed_locations)}/{len(AUSTRALIAN_LOCATIONS)} location(s) "
                     f"had at least one failed step: {', '.join(failed_locations)}"
                 )
-                # A handful of locations hitting a transient error is expected
-                # from time to time and shouldn't fail the whole run (the other
-                # locations' data, the report, and the daily commit are still
-                # good and shouldn't be thrown away) - but every location
-                # failing points at something systemic (bad credentials, an
-                # outage) that's worth actually failing loudly for.
+                # A few locations hitting a transient error shouldn't fail the
+                # run (the other locations' data is still good and still gets
+                # committed), but every location failing points at something
+                # systemic (bad credentials, an outage), so that exits 1.
                 if len(failed_locations) == len(AUSTRALIAN_LOCATIONS):
                     exit_code = 1
         else:
@@ -632,16 +619,14 @@ def main() -> None:
 
     if args.accuracy_report:
         locations = AUSTRALIAN_LOCATIONS if args.all_locations else [_location_from_args(args)]
-        # build_html_report only ever uses the most recent report_history_days
-        # anyway (everything older gets trimmed immediately) - +report_window
-        # is a small buffer so the centered rolling-MAE trend has full context
-        # right at the edge of that window too, matching what an unbounded
-        # read would have produced for every visible date.
+        # build_html_report only uses the most recent report_history_days;
+        # +report_window is a buffer so the centered rolling-MAE trend has full
+        # context at the edge of that window too.
         window_days = args.report_history_days + args.report_window
         long_df = build_predictions_long(args.db, locations, window_days=window_days)
-        # Small-slice sub-daily rain: concatenated in as extra synthetic
-        # targets (see build_period_predictions_long's docstring) rather than
-        # given a separate report/rendering path.
+        # Sub-daily rain periods are concatenated in as extra synthetic targets
+        # (see build_period_predictions_long) rather than given a separate
+        # rendering path.
         period_long_df = build_period_predictions_long(args.db, locations, window_days=window_days)
         if not period_long_df.empty:
             long_df = pd.concat([long_df, period_long_df], ignore_index=True) if not long_df.empty else period_long_df

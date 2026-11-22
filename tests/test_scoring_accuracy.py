@@ -178,12 +178,11 @@ def test_build_html_report_handles_empty_input(tmp_path):
 
 
 def test_build_predictions_long_window_days_matches_unbounded_within_window(tmp_path):
-    """window_days bounds the underlying reads to recent history - a real fix,
-    since without it report generation re-scanned every row ever collected on
-    every run and got slower every single day (see build_predictions_long's
-    docstring). The bound must only drop old rows, never change the value of
-    a row it keeps - verified here by comparing every row still inside the
-    window against what an unbounded read produces for that same row.
+    """window_days bounds the underlying reads to recent history, so report
+    generation doesn't re-scan every row ever collected. The bound must only
+    drop old rows, never change the value of a row it keeps - verified here
+    by comparing every row inside the window against what an unbounded read
+    produces for that same row.
     """
     db_path = tmp_path / "weather.db"
     today = local_today(LOCATION)

@@ -16,11 +16,15 @@ def deploy_all_phases(
     model_dir: Path,
     train_window_days: int | None = None,
 ) -> dict[str, Any]:
-    """Run the full local Phase 1-3 pipeline.
+    """Run the full local Phase 1-3 pipeline for one location.
 
-    Phase 1: Backfill historical forecasts + actual observations.
-    Phase 2: Build/export model-ready wide training dataset.
-    Phase 3: Train ML post-processing models and produce latest prediction when possible.
+    Phase 1: backfill `days_back` days of Open-Meteo historical forecasts and
+    actuals, collect live forecasts for the default target date, and record
+    actuals (yesterday plus recent gaps).
+    Phase 2: build the wide ML feature table and write it to processed_path
+    (CSV if the suffix is .csv or Parquet fails).
+    Phase 3: train the daily ML models (min_rows = min(30, max(10, days_back // 2)))
+    and predict the default target date when possible.
     """
     backfill(db_path, location, days_back)
     collected = collect_forecasts(db_path, location)

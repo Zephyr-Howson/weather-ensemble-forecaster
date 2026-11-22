@@ -24,7 +24,7 @@ FORECAST_VARIABLES: dict[str, str] = {
     "weather_code": "Weather condition code",
 }
 
-# Backwards-compatible alias used by older modules/tests.
+# Alias of FORECAST_VARIABLES (nothing in src/ or tests/ uses it).
 VARIABLES = FORECAST_VARIABLES
 
 # True observed targets. Rain probability is deliberately not included because
@@ -44,11 +44,11 @@ TARGETS: dict[str, str] = {
 RAIN_THRESHOLD_MM = float(os.getenv("RAIN_THRESHOLD_MM", "0.2"))
 TIMEOUT_SECONDS = 15
 
-# Sub-daily rain prediction (small slice, precipitation only - see
-# ForecastPeriodRecord). Hour ranges are the location's local hour-of-day,
-# end-exclusive. Listed in chronological order - report.py's card order and
-# every walk-forward loop below follow this dict's order, so keep it that way
-# rather than alphabetical.
+# Sub-daily rain periods (precipitation only - see ForecastPeriodRecord). Hour
+# ranges are the location's local hour-of-day, end-exclusive. Listed in
+# chronological order - report.py's card order and every per-period loop
+# (cli.py, backtest.py, best.py, ...) follow this dict's order, so keep it that
+# way rather than alphabetical.
 PERIOD_HOURS: dict[str, tuple[int, int]] = {
     "overnight": (0, 6),
     "morning": (6, 12),
@@ -57,9 +57,10 @@ PERIOD_HOURS: dict[str, tuple[int, int]] = {
 }
 PERIODS: list[str] = list(PERIOD_HOURS)
 
-# Open-Meteo model suite used as the first serious ensemble.
+# Open-Meteo models collected live, each stored as source "open_meteo_<key>".
 # These are separate numerical weather prediction systems exposed through
-# Open-Meteo and can be backfilled through the Historical Forecast API.
+# Open-Meteo; all but best_match are also backfilled through the Historical
+# Forecast API (see OPEN_METEO_BACKFILL_MODELS).
 OPEN_METEO_MODELS: dict[str, str] = {
     "best_match": "Open-Meteo Best Match",
     "ecmwf_ifs025": "ECMWF IFS 0.25°",
@@ -76,16 +77,17 @@ OPEN_METEO_BACKFILL_MODELS: dict[str, str] = {
     key: value for key, value in OPEN_METEO_MODELS.items() if key != "best_match"
 }
 
-# Some Open-Meteo models may return sparse or null fields in certain regions.
-# Keep them optional unless they are verified to provide stable data for your
-# target locations.
+# Further Open-Meteo models that may return sparse or null fields in some
+# regions. Not collected: nothing reads this dict. Move a model into
+# OPEN_METEO_MODELS once it's verified to give stable data for these locations.
 OPTIONAL_OPEN_METEO_MODELS: dict[str, str] = {
     "icon_global": "DWD ICON Global",
     "bom_access_global": "BOM ACCESS Global",
 }
 
-# Optional live-only providers. They are useful going forward, but they do not
-# give the same historical forecast backfill advantage as Open-Meteo.
+# Names of the optional live-only providers, which can't be backfilled the way
+# Open-Meteo can. Informational only - the fetchers actually collected are
+# registered in sources.OPTIONAL_FORECAST_SOURCES.
 OPTIONAL_LIVE_PROVIDERS = [
     "weatherapi",
     "visual_crossing",
@@ -168,12 +170,10 @@ def get_db_path() -> Path:
 def get_periods_db_path(db_path: Path | None = None) -> Path:
     """Sub-daily rain data lives in its own SQLite file, next to the main one.
 
-    Splitting it out keeps either file's individual size from climbing as
-    fast - the combined file already drew a GitHub warning at 92MB (their
-    hard limit is 100MB, per-file) after this feature's first day of data
-    across 30 locations. Defaults to WEATHER_PERIODS_DB_PATH if set,
-    otherwise "<name>_periods<suffix>" next to whatever db_path resolves to
-    (so a custom --db path still gets a sensibly-named sibling file).
+    Keeping it separate keeps each git-committed file well under GitHub's
+    100MB per-file limit. Uses WEATHER_PERIODS_DB_PATH if set, otherwise
+    "<name>_periods<suffix>" next to whatever db_path resolves to (so a
+    custom --db path still gets a sensibly-named sibling file).
     """
     env_override = os.getenv("WEATHER_PERIODS_DB_PATH")
     if env_override:
@@ -184,10 +184,11 @@ def get_periods_db_path(db_path: Path | None = None) -> Path:
 
 def get_report_archive_db_path(db_path: Path | None = None) -> Path:
     """Dated report snapshots (see report_archive.py) live in their own
-    SQLite file too, for the same reason as get_periods_db_path above: a
-    gzip-compressed HTML blob per day is small individually but not
-    something the main weather.db's routine forecast/prediction queries
-    should ever have to carry alongside them.
+    SQLite file too: a gzip-compressed HTML blob per report run is small
+    individually but not something the main weather.db's routine
+    forecast/prediction queries should have to carry. Uses
+    WEATHER_REPORT_ARCHIVE_DB_PATH if set, otherwise
+    "<name>_report_archive<suffix>" next to db_path.
     """
     env_override = os.getenv("WEATHER_REPORT_ARCHIVE_DB_PATH")
     if env_override:

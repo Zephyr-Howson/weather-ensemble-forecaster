@@ -31,17 +31,13 @@ from weather_ensemble.sources import FORECAST_SOURCES
 
 
 def _js_object_assignment(var_name: str, data: dict) -> str:
-    """`window.VAR = {...}` as one assignment per top-level key instead of a
-    single json.dumps of the whole dict on one line.
+    """`window.VAR = {...}` written as one assignment per top-level key rather
+    than a single json.dumps of the whole dict on one line.
 
-    A generated report with 30 locations' worth of MAE/trend history embeds
-    megabytes of JSON - as one line, that's long enough that most diff tools
-    (VS Code's included) give up computing a real line-by-line comparison and
-    fall back to "whole line changed", making every regenerated report look
-    like a total rewrite. Splitting into one line per key keeps each line's
-    content bounded by a single location/target's data - typically tens of KB,
-    not megabytes - so a diff can actually localize what changed. The runtime
-    result is identical either way; only how it's written to the file differs.
+    The report embeds megabytes of JSON; on a single line, diff tools give up
+    on line-level comparison and show every regenerated report as a total
+    rewrite. One line per key keeps each line bounded by one key's data so
+    diffs stay local. The runtime result is the same object either way.
     """
     lines = [f"window.{var_name} = {{}};"]
     for key, value in data.items():
@@ -50,12 +46,10 @@ def _js_object_assignment(var_name: str, data: dict) -> str:
 
 
 def _location_data_script(location_data: dict) -> str:
-    """Same one-assignment-per-line idea as _js_object_assignment, but one
-    level deeper: location_data is target -> {"locations": {location: {...}},
-    ...other small keys}, and "locations" (30 locations' full MAE/trend
-    history) is what actually makes a single target's line hundreds of KB.
-    Splitting that inner dict too bounds every line to roughly one location's
-    worth of data - tens of KB, comfortably below where diff tools give up.
+    """Same one-assignment-per-line idea as _js_object_assignment, one level
+    deeper: location_data is target -> {"locations": {location: {...}}, ...other
+    small keys}, and "locations" holds every location's MAE/trend series, so it
+    is split per location too, bounding each line to one (target, location).
     """
     lines = ["window.__LOCATION_DATA = {};"]
     for target, spec in location_data.items():
@@ -81,16 +75,14 @@ TARGET_LABELS = {
     "pressure_msl": "Pressure (MSL)",
 }
 
-# Small-slice sub-daily rain prediction - synthetic per-period target names
-# (see scoring.build_period_predictions_long's docstring for why these are
-# just extra "target" values rather than a separate rendering path).
+# Sub-daily rain: synthetic per-period target names, rendered like any other
+# target (see scoring.build_period_predictions_long).
 PERIOD_TARGETS = [f"precipitation_sum_{period}" for period in PERIODS]
 TARGET_LABELS.update({f"precipitation_sum_{period}": f"Precipitation — {period.capitalize()}" for period in PERIODS})
 
-# Single source of truth for target order, used by both the "recent
-# forecasts" table and the historical-performance cards - requested display
-# order rather than TARGETS' declaration order (did_rain moves before
-# precipitation_sum, and the sub-daily periods slot in right after it).
+# Display order for both the Recent forecasts table and the Historical
+# accuracy cards. Differs from TARGETS' declaration order: did_rain comes
+# before precipitation_sum, and the sub-daily periods follow precipitation_sum.
 TARGET_ORDER = [
     "max_temp",
     "min_temp",
@@ -119,22 +111,16 @@ RECENT_UNITS = {
 RECENT_UNITS.update({f"precipitation_sum_{period}": "mm" for period in PERIODS})
 
 # "At a glance" weather condition + icon, shown above the AI narrative in the
-# Recent forecasts card. Cloud-cover bands mirror narrative.py's own
-# SYSTEM_PROMPT thresholds exactly, so the icon and the narrative text never
-# disagree about whether a day reads as "sunny" or "overcast".
+# Recent forecasts card. Cloud-cover bands (upper bounds, %) match the
+# cloud-cover bands in narrative.py's SYSTEM_PROMPT, so the icon and the
+# narrative agree on whether a day reads as "sunny" or "overcast".
 #
-# The showers/rain/storm icon overrides use a 2/5/20mm ladder (not
-# config.RAIN_THRESHOLD_MM, 0.2mm, this project's did_rain classification
-# cutoff) - a real mismatch found by screenshot: a 0.7mm trace on an
-# 11%-cloud-cover day showed a full rain-cloud icon while the narrative
-# itself called it "mostly sunny" with "minimal rain expected". 0.2mm is the
-# right cutoff for a binary rain/no-rain classification, but it's far too
-# low to dominate an at-a-glance icon over what's otherwise a sunny day -
-# the icon should track "would a person call this a rainy day". 5mm/20mm
-# match narrative.py's own "wet"/"heavy rain" bands (its umbrella-worthy
-# threshold); 2mm sits below that as a lighter "showers" tier - still enough
-# to override the cloud-cover icon, but visibly lighter than a full rain
-# cloud (see _weather_icon_svg).
+# The showers/rain/storm icon overrides use a 2/5/20mm ladder rather than
+# config.RAIN_THRESHOLD_MM (0.2mm, the did_rain classification cutoff): a
+# trace of rain shouldn't turn an otherwise sunny day's icon into a rain
+# cloud - the icon tracks "would a person call this a rainy day". 5mm/20mm
+# match narrative.py's "wet"/"heavy rain" bands; 2mm is a lighter "showers"
+# tier that adds drops to the cloud-cover icon (see _weather_icon_svg).
 _CLOUD_BANDS = [
     (10, "sunny", "Sunny"),
     (30, "mostly_sunny", "Mostly sunny"),
@@ -173,11 +159,9 @@ def weather_condition(cloud_cover: float | None, precipitation_sum: float | None
 
     base_kind, base_label = _cloud_band(cloud_cover)
     if precipitation_sum is not None and precipitation_sum >= _ICON_SHOWERS_MM:
-        # "sunny" has no cloud shape at all (just a sun), so showers on a
-        # "sunny" day borrows mostly_sunny's icon instead - a raincloud has
-        # to come from somewhere. The label stays plain "Showers" either
-        # way; the cloud-band wording was only ever needed to justify which
-        # icon got picked, and showers is the whole story worth saying.
+        # "sunny" has no cloud shape (just a sun) to hang rain drops on, so
+        # showers on a "sunny" day uses mostly_sunny's icon. The label is
+        # plain "Showers" whatever the cloud band.
         icon_kind = "mostly_sunny" if base_kind == "sunny" else base_kind
         return f"{icon_kind}_showers", "Showers"
     return base_kind, base_label
@@ -236,10 +220,8 @@ def _weather_icon_svg(kind: str) -> str:
     """
     cloud_band_parts: dict[str, str] = {
         "sunny": _sun(24, 24, 11),
-        # mostly_sunny/partly_cloudy previously shrank the sun *and* grew the
-        # cloud together, so partly_cloudy ended up reading as "mostly
-        # cloudy" instead - the sun should stay the dominant shape all the
-        # way through "partly cloudy"; only mostly_cloudy flips that balance.
+        # The sun stays the dominant shape through "partly cloudy"; only
+        # mostly_cloudy makes the cloud dominant.
         "mostly_sunny": _sun(19, 18, 10) + _cloud(30, 32, 0.55),
         "partly_cloudy": _sun(18, 17, 9) + _cloud(28, 30, 0.9),
         "mostly_cloudy": _sun(15, 14, 6.5) + _cloud(26, 27, 1.1),
@@ -278,12 +260,15 @@ def _format_recent_value(target: str, value, field: str) -> str:
 
 def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str, list[dict]]:
     """Per location, the most recent RECENT_DAYS_COUNT dates that have any
-    ensemble/ML prediction or actual at all - not a fixed calendar-day anchor
-    (today, yesterday, ...), which could land on a date with nothing recorded
-    yet. Newest first. A specific field missing for one of those dates (a
-    prediction that failed to generate, an actual that hasn't arrived) is left
-    as None per-target rather than dropping the row, so the table renders a
-    blank cell instead.
+    ensemble_predictions/ml_predictions row or actual, newest first - not a
+    fixed calendar anchor (today, yesterday, ...), which could land on a date
+    with nothing recorded yet.
+
+    Each day holds the latest Weighted (ensemble), ML and Best prediction, the
+    actual, the four sub-daily period rain values for each, and the latest
+    best_narratives text. A value missing for one of those dates (a prediction
+    that failed to generate, an actual that hasn't arrived) is None, which the
+    table renders as "—".
     """
     data: dict[str, list[dict]] = {}
     with db.connect(db_path) as conn, db.connect_periods(get_periods_db_path(db_path)) as period_conn:
@@ -331,18 +316,16 @@ def _recent_forecast_data(db_path: Path, locations: list[Location]) -> dict[str,
 
                 ensemble_values = {t: (ens[t] if ens is not None else None) for t in RECENT_TARGETS if t in TARGETS}
                 ml_values = {t: (ml[t] if ml is not None else None) for t in RECENT_TARGETS if t in TARGETS}
-                # best_predictions has no did_rain column at all (only
-                # did_rain_probability, see db.py) - excluded from this generic
-                # pull rather than raising, and set explicitly below like the
-                # other two models' rain field.
+                # best_predictions has no did_rain column (only
+                # did_rain_probability, see db.py), so it is skipped here and
+                # set explicitly below like the other two models' rain field.
                 best_values = {t: (best[t] if best is not None else None) for t in RECENT_TARGETS if t in TARGETS and t != "did_rain"}
                 actual_values = {t: (actual[t] if actual is not None else None) for t in RECENT_TARGETS if t in TARGETS}
 
-                # "Rain" is a % chance forecast now (still scored against the
-                # binary did_rain actual - see scoring.py), so the two forecast
-                # columns show each model's underlying probability field
-                # instead of its thresholded 0/1 classification. Actual stays
-                # the true observed outcome, untouched.
+                # "Rain" is a % chance forecast (scored against the binary
+                # did_rain actual - see scoring.py), so the forecast columns
+                # show each model's rain probability as a 0-1 fraction rather
+                # than a thresholded 0/1 class. Actual is the observed 0/1.
                 if ens is not None and ens["rain_probability"] is not None:
                     ensemble_values["did_rain"] = round(ens["rain_probability"] / 100.0, 3)
                 if ml is not None and ml["did_rain_probability"] is not None:
@@ -441,12 +424,13 @@ def _recent_forecast_html(recent_data: dict[str, list[dict]], sample_location: s
     """Rendered once for a sample location purely as the pre-JS document
     structure - the section starts hidden (style="display:none") since the
     default location selection is "All locations" (pooled), and JS shows it
-    with the real selected location's data as soon as it resolves the current
-    dropdown value (which may be a remembered real location, not "__ALL__").
+    with the selected location's data once it resolves the dropdown value
+    (which may come from a ?location= URL parameter or a remembered choice).
+    The section stays hidden while "All locations" is selected.
 
     One panel is shown at a time via a day-tab strip, rather than stacking all
-    RECENT_DAYS_COUNT panels - on a phone that's the difference between one
-    table and a scroll past ~5x as many rows before reaching the first chart.
+    RECENT_DAYS_COUNT panels, so a phone doesn't scroll past every day's table
+    before reaching the first chart.
     updateRecentForecast (see _recent_forecast_script) still refreshes every
     panel's cells regardless of which one is visible, so switching tabs is a
     pure CSS/attribute toggle with no data re-fetch.
@@ -608,17 +592,15 @@ document.addEventListener("DOMContentLoaded", function () {{
 </script>
 """
 
-# Reference palette (see dataviz skill, references/palette.md). Ensemble/ML -
-# the two models this report is actually about - get the palette's blue/green
-# categorical slots, painted solid and on top. Baselines are grey, dashed
-# reference lines rather than competing series. Individual raw provider
-# sources are deliberately NOT flat gray: each gets its own shade along a
-# fixed orange->red gradient (the palette's own orange/red categorical steps
-# as endpoints) so they stay visually distinguishable while still reading as
-# one de-emphasized "family" behind the hero lines. The gradient position is
-# assigned by each source's fixed position in FORECAST_SOURCES (identity, not
-# by current error rank) so a source never changes shade because it started
-# winning or losing - see the "recolor-on-filter" anti-pattern.
+# Chart palette (based on the dataviz skill's references/palette.md). The
+# three "hero" models this report is about - Weighted (ensemble), ML and Best -
+# get blue/green/purple, painted solid and on top. Baselines are grey
+# dashed/dotted reference lines rather than competing series. Raw provider
+# sources each get their own shade along a fixed yellow->dark-red gradient
+# (RAW_SOURCE_GRADIENT_*) so they stay distinguishable while reading as one
+# de-emphasized family behind the hero lines. A source's shade comes from its
+# fixed position in FORECAST_SOURCES (identity, not current error rank), so it
+# never changes colour when it starts winning or losing.
 HERO_STYLE = {
     MODEL_ENSEMBLE: {
         "legend": "Weighted",
@@ -636,17 +618,12 @@ HERO_STYLE = {
         "width": 2.5,
         "opacity": 1.0,
     },
-    # Purple, per-mode-shifted (not a straight light/dark pair like the other
-    # two heroes) - a manual OKLab check against this exact blue found that a
-    # single mid-tone purple loses CVD separation from Weighted's blue almost
-    # entirely under protanopia simulation on a dark surface (ΔE ~2, well
-    # under the ≥8 target). Going deep/saturated in light mode and light/
-    # pastel in dark mode instead uses lightness - a channel CVD doesn't
-    # compromise - as the separating signal from blue, clearing the ≥15
-    # normal-vision floor and the ≥8 CVD target against both blue and green
-    # in both modes (the dataviz skill's own validator script wasn't runnable
-    # in this environment - no node - so this was checked with an equivalent
-    # manual OKLab + Brettel-matrix CVD simulation instead).
+    # Purple, deep in light mode and pastel in dark mode (unlike the other two
+    # heroes' near-identical light/dark pair): a mid-tone purple is almost
+    # indistinguishable from Weighted's blue under protanopia on a dark
+    # surface, so lightness - which colour-vision deficiency doesn't affect -
+    # carries the separation from both blue and green (checked with an OKLab +
+    # Brettel CVD simulation: ΔE ≥15 normal vision, ≥8 CVD, in both modes).
     MODEL_BEST: {
         "legend": "Best",
         "light": "#68166b",
@@ -681,7 +658,7 @@ RAW_SOURCE_BASE_STYLE = {"dash": "solid", "width": 1.5, "opacity": 0.8}
 RAW_SOURCE_ORDER = list(FORECAST_SOURCES.keys())
 # Yellow -> dark red: wide enough in both hue and lightness that adjacent
 # sources stay visually distinct even after the 0.8 opacity blend that keeps
-# them de-emphasized behind the ensemble/ML hero lines. The palette's own
+# them de-emphasized behind the hero lines. The palette's own
 # orange/red categorical steps span too narrow a range for this (both read as
 # "orange-ish red", barely different once alpha-blended) - this ramp is
 # deliberately wider than the validated 8-hue categorical set since it's
@@ -689,8 +666,9 @@ RAW_SOURCE_ORDER = list(FORECAST_SOURCES.keys())
 RAW_SOURCE_GRADIENT_LIGHT = ("#d1a300", "#7a1220")
 RAW_SOURCE_GRADIENT_DARK = ("#f2c14e", "#b23a4a")
 
-# Paint order (traces added in this order so the models the report is about
-# render on top of the de-emphasized context lines behind them).
+# Trend-chart paint order: traces are added in ascending z (raw sources 0,
+# baselines 1, Weighted 3, ML 4, Best 5; ties by model name), so the hero
+# models render on top of the context lines.
 _Z_ORDER = {MODEL_ENSEMBLE: 3, MODEL_ML: 4, MODEL_BEST: 5, BASELINE_PERSISTENCE: 1, BASELINE_CLIMATOLOGY: 1}
 
 
@@ -813,20 +791,15 @@ def _trend_figure(
 ) -> tuple[go.Figure, list[str], list[str]]:
     """Build the trend figure with every trace's x fixed to the full `date_index`.
 
-    Every trace (even one with real data on only a handful of those dates)
-    gets the same-length x/y from the start. This matters beyond the initial
-    render: the location dropdown's client-side Plotly.restyle only ever
-    updates `y` (x never changes when switching locations), so if a trace's x
-    were shorter than the other locations' y-arrays, the restyle would
-    silently misalign the real values against the wrong dates instead of
-    erroring - exactly the bug that made a partial-history line (like the
-    ensemble/ML backtest, or a single-sample source) vanish or scramble.
+    Every trace (even one with data on only a few of those dates) gets the
+    same-length x/y. The location dropdown's client-side Plotly.restyle only
+    swaps `y`, never `x`, so a shorter x would silently misalign values
+    against the wrong dates rather than erroring.
 
-    No on-chart legend: the leaderboard bar chart right beside this one
-    already labels every model/source by name using the exact same color
-    mapping, so a second legend here would just repeat it. Trace `name` is
-    kept (not decorative) - it's what the unified hover tooltip uses to label
-    each line's value.
+    No on-chart legend: the leaderboard bar chart beside this one labels every
+    model/source by name with the same colour mapping, and the page-level
+    legend key explains the colour families. The hover tooltip labels each
+    line with its display name.
     """
     fig = go.Figure()
     colors_light: list[str] = []
@@ -844,14 +817,10 @@ def _trend_figure(
                 opacity=style["opacity"],
                 line={"color": style["light"], "width": style["width"], "dash": style["dash"]},
                 hovertemplate=f"{escape(_display_name(model))}: %{{y:.3f}}<extra></extra>",
-                # A day with zero scored rows for this model (a real collection
-                # gap - see data-quality section) leaves a None in the series,
-                # which Plotly breaks the line on by default. connectgaps draws
-                # straight through instead, bridging isolated missing days
-                # rather than visually fragmenting the trend into disconnected
-                # segments - the rolling window already smooths over a single
-                # missing day's effect on nearby points, so a plain break here
-                # was drawing more attention to the gap than the data warrants.
+                # Dates with no rolling value for this model (outside its own
+                # scored date range for the selected location, or inside a gap
+                # at least as long as the rolling window) are None/NaN. connectgaps draws
+                # straight across them instead of fragmenting the line.
                 connectgaps=True,
             )
         )
@@ -904,11 +873,9 @@ def _table_view(board_t: pd.DataFrame) -> str:
 
 
 def _data_quality_for_js(data_quality: dict) -> dict:
-    """data_quality.compute_data_quality returns raw entity identifiers
-    (source names, "ensemble"/"ml"/"best") - presentation-agnostic, like the
-    rest of that module. This is the one place that translates them to the
-    same friendly labels (_display_name) everywhere else in the report uses,
-    done once here rather than needing the embedded JS to re-derive them.
+    """Replace compute_data_quality's raw entity identifiers (source names,
+    "ensemble"/"ml"/"best") with the report's display labels (_display_name),
+    so the embedded JS doesn't need to derive them.
     """
     return {
         key: {
@@ -986,11 +953,8 @@ function updateDataQuality(loc) {{
 
 def _legend_gradient_css() -> str:
     """CSS custom properties for the legend's raw-source gradient swatch,
-    generated from the same RAW_SOURCE_GRADIENT_LIGHT/DARK constants the
-    charts themselves use - kept as a small standalone snippet (rather than
-    folding into the static _PAGE_CSS string) so those two hex pairs stay a
-    single source of truth instead of a second hardcoded copy drifting out
-    of sync with the chart gradient.
+    generated from the RAW_SOURCE_GRADIENT_LIGHT/DARK constants the charts use,
+    so the swatch can't drift out of sync with the chart gradient.
     """
     return f"""
 :root {{ --raw-grad-a: {RAW_SOURCE_GRADIENT_LIGHT[0]}; --raw-grad-b: {RAW_SOURCE_GRADIENT_LIGHT[1]}; }}
@@ -1317,11 +1281,10 @@ header.top p { margin: 0; color: var(--text-secondary); font-size: 13.5px; }
   border-radius: 12px;
   padding: 18px 20px 8px;
   margin-bottom: 18px;
-  /* Anchor-jump lands below the sticky toolbar, not underneath it. A fixed
-     px guess broke on mobile, where the toolbar stacks onto 2-3 rows and is
-     2-3x taller than the single-row desktop layout - --toolbar-height is
-     measured from the real, current toolbar (see the script at the bottom
-     of the page) so this stays correct at any width or wrapped row count. */
+  /* Anchor-jump lands below the sticky toolbar, not underneath it. On
+     mobile the toolbar wraps onto 2-3 rows, so --toolbar-height is measured
+     from the real, current toolbar (see the script at the bottom of the
+     page) and stays correct at any width or wrapped row count. */
   scroll-margin-top: var(--toolbar-height, 72px);
 }
 .card h2 { font-size: 15px; font-weight: 600; margin: 0 0 14px; }
@@ -1412,15 +1375,15 @@ document.addEventListener("DOMContentLoaded", function () {{
 
 def _toolbar_height_script() -> str:
     """Measure the two stacked sticky bars - .subnav (filters, pinned at the
-    very top) and .section-nav (the jump-nav, pinned just below it once
-    scrolled that far) - into custom properties: --subnav-height positions
-    .section-nav directly under .subnav with no gap or overlap, and
-    --toolbar-height (their combined height) is what .card's scroll-margin-top
-    needs so a jump-nav anchor click clears BOTH bars, not just one. A fixed
-    px guess for either broke on mobile, where .subnav wraps onto 2-3 rows
-    and is 2-3x taller than the single-row desktop layout. Re-measured on
-    resize/orientation change, since crossing the 700px breakpoint changes
-    the row count.
+    very top) and .section-nav (the jump-nav, pinned just below it) - into
+    custom properties: --subnav-height positions .section-nav directly under
+    .subnav, and --toolbar-height (their combined height plus 16px) is .card's
+    scroll-margin-top, so a jump-nav anchor click clears both bars. Measured
+    rather than fixed because .subnav wraps onto several rows on narrow
+    screens; re-measured on resize, since crossing the 700px breakpoint
+    changes the row count. Also defines updateScrollFade, which fades the
+    trailing edge of the jump-nav, day tabs and recent-forecast table only
+    when they overflow horizontally.
     """
     return """
 <script>
@@ -1482,10 +1445,9 @@ function renderCharts() {{
       // Colors must be filtered by the exact same mask, in the exact same
       // restyle call, as x/y/text/customdata - a bar chart's baseline entries
       // live inside these arrays (not separate traces), so filtering the
-      // values without also filtering marker.color shifts every color that
-      // came after a removed baseline one slot out of place (this is what
-      // made weatherbit/gfs_global sometimes render grey - the baseline's
-      // color - when baselines were hidden).
+      // values without also filtering marker.color would shift every color
+      // after a removed baseline one slot out of place, giving the next
+      // source the baseline's grey.
       var themeSpec = window.__THEME_TRACES[boardId];
       var isDark = document.documentElement.getAttribute("data-theme") === "dark";
       var colors = themeSpec ? (isDark ? themeSpec.dark : themeSpec.light) : null;
@@ -1496,12 +1458,10 @@ function renderCharts() {{
         if (colors) colors = colors.filter(function (_, i) {{ return !mask[i]; }});
       }}
 
-      // Re-rank for this specific location: best (lowest MAE) first, not
-      // the pooled ranking every location used to inherit. Reordering
-      // mae/n/categories/colors together by the same index permutation
-      // keeps each entity's own color attached to it wherever it lands -
-      // only the row position changes, never which color a model gets (that
-      // would be the "recolor-on-filter" bug this design otherwise avoids).
+      // Re-rank for this specific location: best (lowest MAE) first.
+      // Reordering mae/n/categories/colors together by the same index
+      // permutation keeps each entity's own color attached to it wherever it
+      // lands - only the row position changes, never which color a model gets.
       // A model absent from this location (mae === null) sorts to the
       // bottom rather than breaking the comparator.
       var order = categories.map(function (_, i) {{ return i; }});
@@ -1605,31 +1565,31 @@ def build_html_report(
     history_days: int = 90,
     title: str = "Weather forecast accuracy",
 ) -> Path:
-    """Render a self-contained interactive HTML report.
+    """Render a self-contained interactive HTML report to `output_path`.
 
-    Leads with today's ensemble/ML forecast plus the last few days' predictions
-    alongside their actuals (queried directly from the DB via `db_path`, since
-    today's forecast has no actual yet and would never appear in the scored
-    `long_df`). Below that, every chart is scoped to the last `history_days`
-    (default ~3 months). One card per target variable: a leaderboard (mean
-    absolute error over the last `recent_days`) and a rolling `rolling_window`-
-    day MAE-over-time line chart, plus a plain-HTML table twin of the
-    leaderboard. The ensemble, ML, and adaptive "Best" models are drawn in
-    their own colors (blue/green/purple) and painted on top; every raw
-    provider source gets its own shade along a fixed orange->red gradient
-    (de-emphasized via opacity/width) so they stay distinguishable without
-    competing with the three models this report is actually about, and the
-    two baselines are grey, dashed/dotted reference lines rather than
-    competing series.
+    Leads with a Recent forecasts section (shown only when a single location
+    is selected): the most recent RECENT_DAYS_COUNT dates' Weighted/ML/Best
+    predictions alongside actuals and Best's narrative, queried directly from
+    the DB via `db_path`, since the newest forecast has no actual yet and so
+    isn't in the scored `long_df`. Below that, Historical accuracy: `long_df`
+    is trimmed to the last `history_days` before its latest date, and each
+    target gets a card with a leaderboard (MAE over the last `recent_days`,
+    capped at `history_days`), a plain-HTML table twin of it, and a centered
+    `rolling_window`-day rolling-MAE line chart. Weighted, ML and Best are
+    drawn in blue/green/purple on top; each raw provider source gets its own
+    shade along a fixed yellow->dark-red gradient; the two baselines are grey
+    dashed/dotted reference lines, hidden until "Show baselines" is ticked. A
+    Data quality section (missing rows / unexpected nulls over the last
+    `recent_days`) closes the page. A location dropdown re-scopes every
+    section client-side.
     """
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     recent_data = _recent_forecast_data(db_path, AUSTRALIAN_LOCATIONS)
-    # Purely the pre-JS document structure - the section starts hidden and JS
-    # fills it with whichever location the shared dropdown actually resolves
-    # to (see _recent_forecast_html's docstring), so which location's data
-    # gets baked into the static markup here doesn't matter.
+    # Only the pre-JS document structure: the section starts hidden and JS
+    # fills it for whichever location the dropdown resolves to (see
+    # _recent_forecast_html), so which location is baked in here doesn't matter.
     sample_recent_location = next(iter(recent_data), "")
     recent_forecast_html = _recent_forecast_html(recent_data, sample_recent_location)
     recent_forecast_script = _recent_forecast_script(recent_data)
@@ -1658,24 +1618,18 @@ def build_html_report(
         {m for m in long_df["model"].unique() if m not in HERO_STYLE and m not in BASELINE_STYLE}
     )
 
-    # Every chart defaults to "All locations" (pooled). The dropdown swaps in
-    # per-location data client-side via Plotly.restyle rather than building a
-    # separate figure per location. The bar chart's row order is re-sorted
-    # per location client-side (best MAE first for whichever location is
-    # selected, not frozen to the pooled ranking) - see renderCharts' board
-    # handling in _controls_script. Colors still follow the entity, not the
-    # row position, when that reorder happens - only line trace order (and
-    # its shared x-axis) stays frozen across locations, since the trend
-    # chart's restyle only ever swaps `y`, not `x` (see _trend_figure's
-    # docstring for why an unequal-length x there would misalign, not just
-    # look unsorted).
+    # Every chart is rendered for "All locations" (pooled). The dropdown swaps
+    # in per-location data client-side via Plotly.restyle rather than building
+    # a separate figure per location. The bar chart's rows are re-sorted per
+    # location client-side (lowest MAE first), with colours following the
+    # entity, not the row - see renderCharts in _controls_script. Line trace
+    # order and the shared x-axis stay fixed across locations, since the trend
+    # restyle only swaps `y` (see _trend_figure).
     location_names = sorted(long_df["location_name"].unique())
     target_slices = {t: long_df[long_df["target"] == t] for t in targets}
     combo_slices = {key: df for key, df in long_df.groupby(["target", "location_name"])}
 
-    # Same recent_days window as the leaderboard above (default 30) - reusing
-    # that existing, already-configurable parameter rather than a second
-    # hardcoded "last N days" concept for what's fundamentally the same idea.
+    # Data quality uses the same recent_days window as the leaderboard.
     data_quality_js = _data_quality_for_js(compute_data_quality(db_path, location_names, window_days=recent_days))
     data_quality_html = _data_quality_html(data_quality_js, recent_days)
     data_quality_script = _data_quality_script(data_quality_js)
@@ -1697,16 +1651,14 @@ def build_html_report(
 
         trend_order = sorted(trend_t["model"].unique(), key=_z_key)
         date_index = sorted({d.date().isoformat() for d in trend_t["forecast_date"]})
-        # Computed once and reused as both the initial ("All locations") render
-        # and the "__ALL__" entry in the location cube below, so the two can
-        # never drift apart into different numbers for the same view.
+        # Computed once and used for both the initial ("All locations") render
+        # and the "__ALL__" entry in the location data below, so the two always
+        # agree.
         all_trend_series = _trend_series(target_slices[target], trend_order, date_index, rolling_window)
         all_mae, all_n = _board_series(target_slices[target], board_order, recent_days)
 
-        # Same height as the bar chart next to it, not a fixed 300px - the
-        # bar chart's height already flexes with its row count (34px/bar), so
-        # matching it here keeps both panels the same height in the layout
-        # instead of leaving the (usually taller) bar chart's extra space unused.
+        # Same height as the bar chart beside it, whose height scales with its
+        # row count (34px per bar + 60px), so both panels line up.
         trend_fig, trend_light, trend_dark = _trend_figure(date_index, trend_order, all_trend_series, raw_colors, panel_height)
         theme_traces[board_id] = {"kind": "bar", "light": board_light, "dark": board_dark}
         theme_traces[trend_id] = {"kind": "line", "light": trend_light, "dark": trend_dark}
@@ -1719,17 +1671,13 @@ def build_html_report(
             locations_payload[loc] = {"mae": mae, "n": n, "trend": trend_series}
         location_data[target] = {
             "locations": locations_payload,
-            # What the "hide baselines" toggle needs: the bar chart's baseline
-            # entries live inside one trace's arrays (not separate traces), so
-            # hiding them means re-filtering x/y/text/customdata together (never
-            # just x) - the same array-length-mismatch trap the location
-            # dropdown hit with the trend chart. board_categories is the full
-            # label list, wired to mae/n below by shared array position (still
-            # the pooled ranking's order on the wire) - JS filters it by the
-            # same baseline mask it applies to the values, then re-sorts all
-            # four arrays together by this location's own mae before
-            # rendering, instead of leaving a label with no bar next to it or
-            # showing every location in the pooled order.
+            # For the baseline toggle: the bar chart's baseline entries live
+            # inside one trace's arrays (not separate traces), so hiding them
+            # means filtering x/y/text/customdata/colours together by the same
+            # mask. board_categories is the full label list in the pooled
+            # ranking's order, aligned with each location's mae/n by array
+            # position; JS filters all of them by baseline_mask_board, then
+            # re-sorts them together by the selected location's mae.
             "board_categories": [_bar_display_name(m) for m in board_order],
             "baseline_mask_board": [m in BASELINE_STYLE for m in board_order],
             # The trend chart's baselines are separate traces, so hiding them
@@ -1763,13 +1711,11 @@ def build_html_report(
         f'<a href="#card-{escape(target)}">{escape(TARGET_LABELS.get(target, target))}</a>' for target in rendered_targets
     )
 
-    # Hero (Weighted/ML) and raw-source colors are always visible so the
-    # trend line chart - which has no on-chart legend of its own, see
-    # _trend_figure's docstring - is self-explanatory without hovering.
-    # Baselines are wrapped in their own #legend-baselines span and hidden
-    # by default: dashed-vs-dotted isn't something a bar chart can show, so
-    # they're the one pairing that needs a legend at all, and only while the
-    # baseline toggle is actually on - see renderCharts.
+    # Hero (Weighted/ML/Best) and raw-source swatches are always visible so
+    # the trend chart - which has no on-chart legend, see _trend_figure - reads
+    # without hovering. Baseline swatches sit in #legend-baselines, shown only
+    # while the baseline toggle is on (see renderCharts); they're needed
+    # because the bar chart can't show the dashed-vs-dotted distinction.
     legend_key_hero = "".join(
         f"<span><span class='swatch' style='background:{style['light']}'></span>{escape(style['legend'])}</span>"
         for style in HERO_STYLE.values()
@@ -1817,7 +1763,7 @@ def build_html_report(
   </div>
   {recent_forecast_html}
   <h2 class="historical-accuracy-heading">Historical accuracy</h2>
-  <p class="section-sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; the leaderboard re-ranks best-to-worst for whichever location you pick; trend-line order stays fixed to the all-locations ranking.</p>
+  <p class="section-sub">Last {recent_days}d leaderboard &middot; {rolling_window}d rolling MAE over time &middot; the leaderboard re-ranks best-to-worst for whichever location you pick; trend lines keep the same order and colours for every location.</p>
   <div class="section-nav">
     <nav class="jump-nav" aria-label="Jump to metric">{jump_nav}</nav>
   </div>

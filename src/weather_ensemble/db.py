@@ -26,14 +26,11 @@ ACTUAL_COLUMNS = [
     "weather_code", "raw_json",
 ]
 
-# Small-slice sub-daily rain prediction (morning/afternoon/evening) - see
-# ForecastPeriodRecord/ActualPeriodRecord. Deliberately separate tables rather
-# than more columns on the four above: those are already wide enough that a
-# column/placeholder-count mismatch has bitten this project once before
-# (backtest.py's INSERT), and period data doesn't apply to most of their
-# existing columns (temp, wind, etc.) anyway. No raw_json here - it would just
-# be the same full hourly payload duplicated 3x per source per day; the
-# parent forecasts/actuals row already has it.
+# Sub-daily rain periods (overnight/morning/afternoon/evening) - see
+# ForecastPeriodRecord/ActualPeriodRecord. Separate tables (in a separate
+# database file, see init_periods_db) rather than more columns on the daily
+# tables, which are already wide and whose other columns (temp, wind, etc.)
+# don't apply to periods. No raw_json column.
 FORECAST_PERIOD_COLUMNS = [
     "source", "location_name", "lat", "lon", "forecast_date", "period", "collected_at",
     "precipitation_sum", "rain_probability", "collection_method",
@@ -226,30 +223,27 @@ def init_db(conn: sqlite3.Connection) -> None:
         """
     )
 
-    # Lightweight migrations for existing local databases created by earlier versions.
+    # Add columns that databases created with an older schema may lack.
     for col in ["precipitation_sum", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
         _add_column_if_missing(conn, "forecasts", col, "REAL")
     _add_column_if_missing(conn, "forecasts", "collection_method", "TEXT")
     for col in ["did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
         _add_column_if_missing(conn, "actuals", col, "REAL")
-    # Earlier versions had actuals.rain_probability. Leave it if present; no new code uses it.
+    # Older databases may have an actuals.rain_probability column; it is left in place and unused.
     for col in ["precipitation_sum", "did_rain", "wind_gusts", "cloud_cover", "humidity", "pressure_msl", "weather_code"]:
         _add_column_if_missing(conn, "ensemble_predictions", col, "REAL")
     for col in ["cloud_cover", "humidity", "pressure_msl"]:
         _add_column_if_missing(conn, "ml_predictions", col, "REAL")
 
-    # uv_index was removed: forecast and actual sources turned out to measure
-    # different things (forecast-side values ran ~2-4x the observed ground
-    # truth, a systematic bias not noise - see the "why is the UV trend graph
-    # strange" investigation), making it meaningless to keep. Drop it from any
-    # database created by an earlier version.
+    # UV index is not tracked: forecast and actual sources measure different
+    # things (forecast values run ~2-4x the observed ones, a systematic bias),
+    # so the comparison is meaningless. Drop the column wherever it exists.
     for table in ["forecasts", "actuals", "ensemble_predictions", "ml_predictions"]:
         _drop_column_if_present(conn, table, "uv_index")
 
-    # Rows inserted before collection_method existed have no way to record how
-    # they were collected. Recover it from the raw_json tag that
-    # fetch_historical_forecast_with_periods stamps on backfilled rows;
-    # everything else was collected live.
+    # Fill in a missing collection_method: 'backfill' if raw_json carries the
+    # endpoint tag fetch_historical_forecast_with_periods stamps on backfilled
+    # rows, otherwise 'live'.
     conn.execute(
         "UPDATE forecasts SET collection_method = 'backfill' "
         "WHERE collection_method IS NULL AND raw_json LIKE '%historical_forecast_or_past_days%'"
@@ -260,8 +254,8 @@ def init_db(conn: sqlite3.Connection) -> None:
 
 def init_periods_db(conn: sqlite3.Connection) -> None:
     """Sub-daily rain tables, in their own file (see get_periods_db_path) -
-    kept out of init_db's file so this feature's data can grow without
-    pushing the main file toward GitHub's 100MB per-file hard limit.
+    kept out of init_db's file so period data can grow without pushing the
+    main file toward GitHub's 100MB per-file hard limit.
     """
     conn.executescript(
         """
@@ -368,6 +362,8 @@ def init_report_archive_db(conn: sqlite3.Connection) -> None:
 
 
 def insert_forecasts(conn: sqlite3.Connection, records: Iterable[ForecastRecord]) -> int:
+    """INSERT OR IGNORE each record (unique on source, location_name, forecast_date,
+    collected_at); returns the number of rows actually inserted."""
     inserted = 0
     placeholders = ", ".join("?" for _ in FORECAST_COLUMNS)
     column_list = ", ".join(FORECAST_COLUMNS)
@@ -389,6 +385,7 @@ def insert_forecasts(conn: sqlite3.Connection, records: Iterable[ForecastRecord]
 
 
 def upsert_actual(conn: sqlite3.Connection, r: ActualRecord) -> None:
+    """Insert, or overwrite the existing row for (source, location_name, actual_date)."""
     conn.execute(
         """
         INSERT INTO actuals (
@@ -424,6 +421,8 @@ def upsert_actual(conn: sqlite3.Connection, r: ActualRecord) -> None:
 
 
 def insert_forecast_periods(conn: sqlite3.Connection, records: Iterable[ForecastPeriodRecord]) -> int:
+    """INSERT OR IGNORE each record (unique on source, location_name, forecast_date,
+    period, collected_at); returns the number of rows actually inserted."""
     inserted = 0
     placeholders = ", ".join("?" for _ in FORECAST_PERIOD_COLUMNS)
     column_list = ", ".join(FORECAST_PERIOD_COLUMNS)
@@ -443,6 +442,7 @@ def insert_forecast_periods(conn: sqlite3.Connection, records: Iterable[Forecast
 
 
 def upsert_actual_period(conn: sqlite3.Connection, r: ActualPeriodRecord) -> None:
+    """Insert, or overwrite the row for (source, location_name, actual_date, period)."""
     conn.execute(
         """
         INSERT INTO actual_periods (

@@ -30,10 +30,10 @@ def _mean(items: list[dict], key: str) -> float | None:
 def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
     """Fetch target_date's forecast from WeatherAPI.com.
 
-    Requires WEATHERAPI_KEY in your .env. This collector is live-forecast only;
-    WeatherAPI's history endpoint returns past observations, not archived
-    forecasts, so it can't substitute for backfilling this - Open-Meteo still
-    handles historical forecast backfill.
+    Requires WEATHERAPI_KEY in your .env. Live-only: WeatherAPI's history
+    endpoint returns past observations, not archived forecasts, so backfill uses
+    Open-Meteo. Gusts, cloud and pressure are the hourly max/means for the day;
+    weather_code is WeatherAPI's own condition code, not a WMO code.
     """
     api_key = os.getenv("WEATHERAPI_KEY")
     if not api_key:
@@ -43,10 +43,8 @@ def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
     params = {
         "key": api_key,
         "q": f"{location.lat},{location.lon}",
-        # Requests one extra day of buffer beyond the 2 ever actually needed
-        # (today + tomorrow) - a run delayed enough to reach this fetch after
-        # its intended target_date has already slipped by a day still finds
-        # it in the response instead of silently matching the wrong index.
+        # Today and tomorrow (where a live target date falls) plus a day's
+        # margin; the target is matched by date, not by position.
         "days": 3,
         "aqi": "no",
         "alerts": "no",

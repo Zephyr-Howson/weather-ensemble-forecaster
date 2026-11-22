@@ -23,11 +23,10 @@ MODEL_BEST = "best"
 
 CONTINUOUS_TARGETS = [t for t in TARGETS if t != "did_rain"]
 
-# Every prediction in this project (raw source, ensemble, ML) is made exactly
-# one day ahead of the date it's for - collect_forecasts/blend_forecast/
-# predict_latest_ml all target "tomorrow" and run once a day. So unlike a
-# typical forecast-accuracy setup, there's no lead-time bucketing to worry
-# about here: every row scored below is a same lead-time (1-day-ahead) forecast.
+# Live collection, blending and ML/Best prediction (collect_forecasts,
+# blend_forecast, predict_latest_ml, best.py) all target the next local day
+# and run once a day, so every row scored here is treated as a 1-day-ahead
+# forecast and there is no lead-time bucketing.
 
 
 def _long_rows_from_wide(
@@ -47,11 +46,11 @@ def _long_rows_from_wide(
 
             if target == "did_rain":
                 # Scored as % chance of rain against the binary rain/no-rain
-                # outcome (mean absolute error between a 0-1 forecast
-                # probability and the 0/1 actual), not a thresholded
-                # classification - callers normalize whichever probability
-                # field their model carries (rain_probability, 0-100;
-                # did_rain_probability, already 0-1) into this common column.
+                # outcome (absolute error between a 0-1 forecast probability
+                # and the 0/1 actual), not a thresholded classification.
+                # Callers normalize whichever probability field their model
+                # carries (rain_probability, 0-100; did_rain_probability,
+                # already 0-1) into the _rain_prob_fraction column.
                 predicted = r.get("_rain_prob_fraction")
                 if pd.isna(predicted):
                     continue
@@ -155,10 +154,11 @@ def _ml_predictions(db_path: Path, location: Location, window_days: int | None =
 def _best_predictions(db_path: Path, location: Location, window_days: int | None = None) -> list[dict]:
     """The adaptive per-target 'Best' pick (see best.py) - mirrors _ml_predictions.
 
-    did_rain_probability is already a 0-1 fraction (best.py stores whichever
-    candidate won for that date's did_rain target in that form, regardless of
-    whether the winner was a raw source's rain_probability/100 or ML's own
-    did_rain_probability), so no further conversion is needed here.
+    best_predictions has no did_rain column, only did_rain_probability, which
+    best.py stores as a 0-1 fraction (the rain probability of the candidate it
+    picked for precipitation_sum, converted from rain_probability/100 when
+    that candidate is a raw source or Weighted), so no further conversion is
+    needed here.
     """
     cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
     with db.connect(db_path) as conn:
@@ -203,20 +203,19 @@ def _baseline_predictions(
     """Persistence ("tomorrow = today") and trailing-average climatology baselines.
 
     Both are derived purely from the actuals history (no forecast needed), using
-    only data strictly before the date being predicted so this can't leak the
-    answer into its own baseline. With only a few months of history so far,
-    climatology uses a trailing rolling mean rather than a true day-of-year
-    seasonal average; once a year-plus of actuals accumulate, this window can
-    be swapped for a same-day-of-year lookup.
+    only data strictly before the date being predicted, so neither can see the
+    answer. Persistence is the previous actuals row's value; climatology is the
+    mean of the previous `climatology_window` actuals rows (needing at least
+    `climatology_min_periods` of them). Both count rows, not calendar days, so
+    a missing actuals date is skipped over. Climatology is a trailing mean, not
+    a day-of-year seasonal average. For did_rain, persistence is a hard 0/1 and
+    climatology is the recent fraction of rainy days.
 
-    `window_days` (see build_predictions_long) is extended by `climatology_window`
-    extra days of actuals when *fetching* - the rolling climatology mean for
-    the very first visible date still needs its own trailing lookback, so
-    fetching only `window_days` back would quietly shrink/degrade its rolling
-    average for dates right at the edge of the window versus the unbounded
-    read it replaces. Those extra older rows exist purely to feed that rolling
-    calculation, though - they're trimmed back off below so the *output* still
-    only covers `window_days`, exactly like every other prediction source.
+    When `window_days` is set (see build_predictions_long), actuals are fetched
+    `climatology_window` extra days further back so the climatology mean for
+    the earliest visible date still has its full lookback; output rows before
+    the `window_days` cutoff are then dropped, so the output covers the same
+    span as every other prediction source.
     """
     visible_cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else None
     fetch_cutoff = (
@@ -270,15 +269,16 @@ def build_predictions_long(db_path: Path, locations: list[Location], window_days
 
     `model` ranges over every raw forecast source, plus 'ensemble', 'ml', 'best',
     and the two baselines. This is the single table every rollup (rolling
-    accuracy over time, leaderboards) in this module is built from.
+    accuracy over time, leaderboards) in this module is built from. Adds
+    `error` (predicted - actual) and `abs_error` columns.
 
-    `window_days` bounds every underlying query to recent history instead of
-    scanning every row ever collected - a real incident: with no bound here,
-    report generation re-read and re-melted the *entire* history of every
-    table on every run, so its cost grew a little more every single day even
-    though `build_html_report` immediately discards everything older than its
-    own `history_days` right after. Left as None (unbounded) for callers that
-    genuinely need full history (e.g. the notebooks).
+    `window_days` bounds every underlying query to forecast dates on or after
+    the location's local today minus `window_days`, so the cost of a run
+    doesn't grow with total history. The accuracy report passes
+    `report_history_days + report_window` (build_html_report only shows the
+    last `history_days` anyway). None reads the full history (backtest.py's
+    walk-forward Best backcast uses this, since its windows are relative to
+    past target dates rather than today).
     """
     rows: list[dict] = []
     for location in locations:
@@ -414,11 +414,10 @@ def _ml_predictions_period(
 def _best_predictions_period(
     db_path: Path, location: Location, period: str, window_days: int | None = None
 ) -> list[dict]:
-    """Small-slice sub-daily rain: mirrors _ml_predictions_period. best.py
-    never independently picks a period winner - each row here is whichever
-    candidate won that date's *daily* precipitation_sum target, so these
-    scores describe how that inherited choice performs at this period, not a
-    separately-optimized one.
+    """Sub-daily rain for Best: mirrors _ml_predictions_period. best.py never
+    picks a separate period winner - each row is the period forecast of the
+    candidate that won that date's *daily* precipitation_sum target, so these
+    scores show how that inherited choice performs at this period.
     """
     cutoff = (local_today(location) - timedelta(days=window_days)).isoformat() if window_days else "0000-01-01"
     with db.connect_periods(get_periods_db_path(db_path)) as conn:
@@ -514,13 +513,13 @@ def _baseline_predictions_period(
 
 
 def build_period_predictions_long(db_path: Path, locations: list[Location], window_days: int | None = None) -> pd.DataFrame:
-    """Small-slice sub-daily rain: mirrors build_predictions_long, one
-    synthetic target per period ("precipitation_sum_morning" etc.) instead of
-    the daily TARGETS set. The existing report renderer is fully generic over
-    `target` strings, so concatenating this with the daily long_df and adding
-    these names to the target list (report.py) is enough to display them -
-    no changes needed to leaderboard()/rolling_error_over_time() or any
-    chart-building code below.
+    """Sub-daily rain: mirrors build_predictions_long, with one synthetic target
+    per period ("precipitation_sum_morning" etc.) instead of the daily TARGETS
+    set. Reads the periods DB (forecast_periods, ensemble/ml/best
+    _predictions_periods, actual_periods). leaderboard(), rolling_error_over_time()
+    and report.py's charts are generic over `target` strings, so the CLI
+    concatenates this onto the daily long_df and report.py lists these names in
+    TARGET_ORDER to display them.
     """
     rows: list[dict] = []
     for location in locations:
@@ -547,29 +546,19 @@ def rolling_error_over_time(long_df: pd.DataFrame, window: int = 7) -> pd.DataFr
     date), then smoothed with a centered `window`-day rolling mean - this is what
     the "accuracy over time" chart plots. Centered means a 7-day window is 3 days
     before + the day itself + 3 days after, not the trailing 7 days ending on that
-    date. Near the most recent date there's no "after" data yet (it hasn't
-    happened), so `min_periods=1` lets the window use however many days are
-    actually available rather than going blank - which means each date within
-    `window // 2` days of the most recent one is recalculated (using more of its
-    "after" side) every time this runs, until enough days have passed to fill
-    the window on both sides.
+    date. Near the most recent date there's no "after" data yet, so
+    `min_periods=1` lets the window use however many days are available rather
+    than going blank - which means each date within `window // 2` days of the
+    most recent one is recalculated (using more of its "after" side) every time
+    this runs, until enough days have passed to fill the window on both sides.
 
-    Reindexed onto each (target, model)'s own full calendar date range (its
-    first through its last appearance) before rolling - a real incident: a
-    model with zero scored rows on one date (a genuine collection gap, not
-    something this function should paper over) previously left that date
-    missing from the output entirely, not present-with-NaN, because pandas'
-    groupby only ever produces a row for a (model, date) combination that
-    exists in the input. `.rolling()` returns exactly one output per input
-    row, so a date with no input row got no output value either - visible in
-    the report as the trend line breaking, and unfixable there by any amount
-    of smoothing since there was nothing to smooth *onto*. Reindexing first
-    gives that date a row (abs_error=NaN, contributing nothing to its own or
-    any other date's average - rolling's mean already skips NaN inputs) so
-    the *surrounding* days' real data can produce a genuine window-smoothed
-    value for it, the same way it already would for any other date. Only
-    fills gaps strictly inside a model's own active range - never invents
-    values before its first day or after its last.
+    Each (target, model) series is reindexed onto its own full calendar date
+    range (first through last appearance) before rolling, because groupby only
+    yields rows for dates that have data. A date with no scored rows gets
+    abs_error=NaN, which contributes nothing to any average but still receives
+    a window-smoothed rolling_mae from the surrounding days. Dates before a
+    model's first day or after its last are not filled. Output columns:
+    forecast_date, abs_error (daily pooled mean), rolling_mae, target, model.
     """
     if long_df.empty:
         return long_df
@@ -594,12 +583,15 @@ def rolling_error_over_time(long_df: pd.DataFrame, window: int = 7) -> pd.DataFr
 
 
 def leaderboard(long_df: pd.DataFrame, recent_days: int | None = 30) -> pd.DataFrame:
-    """Mean absolute error per (target, model), most recent first, best (lowest) ranked first.
+    """MAE and row count (`mae`, `n`) per (target, model), lowest MAE first per target.
 
-    For 'did_rain' this is the mean absolute error against the 0/1 outcome (a
-    Brier-like score for models that emit a probability, and a plain error rate
-    for models that emit a hard 0/1 class) - lower is better for every target,
-    including did_rain, so all rows can be read the same way.
+    Only rows with forecast_date in the last `recent_days` days before the
+    latest date in `long_df` are counted (None counts every row). Rows from all
+    locations in `long_df` are pooled.
+
+    For 'did_rain' this is the mean absolute error between a 0-1 probability
+    and the 0/1 outcome (for the persistence baseline, whose prediction is a
+    hard 0/1, it is the plain error rate). Lower is better for every target.
     """
     if long_df.empty:
         return long_df

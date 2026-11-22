@@ -27,7 +27,12 @@ def _mean_hourly(hourly: list[dict], key: str) -> float | None:
 
 
 def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
-    """Fetch target_date's forecast from wttr.in."""
+    """Fetch target_date's forecast from wttr.in's JSON (format=j1) output.
+
+    No API key. Rain probability, wind and gusts are the day's hourly maxima;
+    cloud, humidity and pressure are hourly means. weather_code is the first
+    hourly block's wttr.in (WWO) code, not a WMO code.
+    """
     url = f"https://wttr.in/{location.lat},{location.lon}"
     response = get_with_retry(url, params={"format": "j1"}, timeout=TIMEOUT_SECONDS)
     payload = response.json()
@@ -39,8 +44,8 @@ def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
 
     hourly = day.get("hourly", [])
 
-    # wttr.in exposes fewer fields and uses different names, so missing values
-    # are left as None rather than faked. The ML pipeline can handle this.
+    # Fields wttr.in can't supply reliably are left None rather than estimated;
+    # the blend and ML pipeline handle missing values.
     return ForecastRecord(
         source="wttr_in",
         location_name=location.name,

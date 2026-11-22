@@ -39,9 +39,12 @@ def fetch_forecast(location: Location, target_date: date) -> ForecastRecord:
     so treat this as a best-effort personal/non-commercial source that could change
     or get blocked without notice, unlike the other providers here.
 
-    BOM's daily forecast has no wind/humidity/cloud/pressure numerics and no WMO
-    weather_code - only a rain chance/amount range, UV index, and temp max/min -
-    so those fields are left None, same as silo.py.
+    No API key. Makes two requests: a location search for the geohash, then the
+    daily forecast. Only max/min temperature, rain chance and rain amount are
+    recorded; precipitation_sum is the midpoint of BOM's min-max amount range
+    (or whichever bound is given).
+    The daily forecast has no wind, humidity, cloud or pressure numbers and no
+    WMO weather code, so those fields are left None.
     """
     geohash = _geohash(location)
     url = f"https://api.weather.bom.gov.au/v1/locations/{geohash}/forecasts/daily"

@@ -96,23 +96,18 @@ def fetch_forecast_with_periods(
     location: Location, target_date: date, model: str = "best_match"
 ) -> tuple[ForecastRecord, list[ForecastPeriodRecord]]:
     """Fetch target_date's daily forecast and its overnight/morning/afternoon/
-    evening split from a single API call.
+    evening rain split from a single API call.
 
-    These used to be two separate requests, with the daily total taken from
-    Open-Meteo's own `daily.precipitation_sum` field and the periods summed
-    from the `hourly.precipitation` array - two independently-computed
-    numbers that routinely disagreed (confirmed empirically: e.g. one
-    source's own daily forecast of 3.3mm against a 0.9mm sum across that same
-    source's own 4 periods for the same day). Deriving both the daily total
-    and the periods from the same summed hourly array here guarantees the
-    daily total always equals the sum of its 4 periods, and halves the
-    number of requests this makes.
+    precipitation_sum (daily and per period) is summed from the hourly
+    `precipitation` array rather than taken from Open-Meteo's own
+    `daily.precipitation_sum`, which is computed independently and can disagree
+    with the hourly values. Summing one array guarantees the daily total equals
+    the sum of its 4 periods. Humidity, cloud cover and pressure are daily means
+    of the hourly values; period rain_probability is the hourly maximum.
 
-    forecast_days=3 gives a day of buffer beyond the 2 (today + tomorrow)
-    ever actually needed - a run delayed enough to reach this fetch after
-    target_date has already slipped by a day still finds it in the response
-    (by searching daily.time for an exact match) instead of blindly trusting
-    a fixed index into Open-Meteo's own day-0-is-today ordering.
+    forecast_days=3 covers local today and tomorrow (where a live target date
+    falls) plus a day's margin, and the target's row is found by matching
+    daily.time rather than by position. Raises ValueError if it is missing.
     """
     url = "https://api.open-meteo.com/v1/forecast"
     params = {
@@ -222,9 +217,9 @@ def fetch_actual(location: Location, target_date: date) -> ActualRecord:
 
 
 def fetch_actual_periods(location: Location, target_date: date) -> list[ActualPeriodRecord]:
-    """Small-slice sub-daily rain ground truth: observed precipitation for
-    target_date, bucketed into morning/afternoon/evening, from Open-Meteo's
-    archive API (real historical observations, not a forecast).
+    """Sub-daily rain ground truth: observed precipitation for target_date,
+    summed into each of PERIODS (overnight/morning/afternoon/evening, local
+    time), from Open-Meteo's archive API.
     """
     url = "https://archive-api.open-meteo.com/v1/archive"
     params = {
@@ -263,17 +258,18 @@ def fetch_actual_periods(location: Location, target_date: date) -> list[ActualPe
 def fetch_historical_forecast_with_periods(
     location: Location, days_back: int, model: str = "best_match"
 ) -> tuple[list[ForecastRecord], list[ForecastPeriodRecord]]:
-    """Backfill archived daily model forecasts and their period split from a
-    single API call - see fetch_forecast_with_periods's docstring for why the
-    daily total is derived from the same summed hourly array as the periods
-    rather than Open-Meteo's own `daily.precipitation_sum` field. This also
-    halves the number of backfill requests, since one call now covers both.
+    """Backfill archived daily model forecasts and their period split for the
+    days_back days before the location's local today, from a single API call.
+
+    Tries the Historical Forecast API first and falls back to the live
+    forecast API's past_days window. As in fetch_forecast_with_periods, the
+    daily and period precipitation totals are both summed from the hourly
+    `precipitation` array. Rows are marked collection_method="backfill", with
+    collected_at set to 21:00 on the day before each forecast date.
 
     Period rows carry no rain_probability: hourly probability isn't reliably
-    available on the historical-forecast/past-days endpoints the way it is
-    on the live forecast one, and probability is only ever a candidate ML
-    feature here, never the regression target, so it's not worth the
-    uncertainty.
+    available on these endpoints, and probability is only an ML feature, never
+    the regression target.
     """
     today = local_today(location)
     start = today - timedelta(days=days_back)
@@ -376,12 +372,9 @@ def fetch_historical_forecast_with_periods(
 
 
 def fetch_historical_actual_periods(location: Location, days_back: int) -> list[ActualPeriodRecord]:
-    """Batched equivalent of calling fetch_actual_periods once per day - a
-    single date-range archive request instead of days_back individual ones,
-    same batching fetch_historical_forecast_with_periods already does for the
-    forecast side. The per-day loop this replaces made backfill()'s period
-    step issue up to 90 sequential requests per location with no
-    concurrency, which made a full 30-location backfill take multiple hours.
+    """Batched fetch_actual_periods for the days_back days before the
+    location's local today: one date-range archive request instead of one
+    per day, which keeps a full 30-location backfill fast.
     """
     today = local_today(location)
     start = today - timedelta(days=days_back)
