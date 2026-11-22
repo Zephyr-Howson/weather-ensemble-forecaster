@@ -160,7 +160,7 @@ def local_today(location: Location) -> date:
     try:
         return datetime.now(ZoneInfo(location.timezone)).date()
     except ZoneInfoNotFoundError:
-        return date.today()  # noqa: DTZ011 - machine-local is the documented fallback here, not a bug
+        return datetime.now().astimezone().date()  # machine-local date is the documented fallback
 
 
 def get_db_path() -> Path:
